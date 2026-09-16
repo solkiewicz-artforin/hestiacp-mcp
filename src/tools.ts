@@ -1,0 +1,364 @@
+import { McpServer } from "@modelcontextprotocol/server";
+import { z } from "zod";
+import { HestiaApiError, type HestiaClient } from "./client.js";
+import type { Config } from "./config.js";
+import { safeError } from "./redact.js";
+
+type Safety = "read" | "mutating" | "destructive";
+type CommandSpec = {
+  name: string;
+  command: `v-${string}`;
+  description: string;
+  safety: Safety;
+  idempotent?: boolean;
+  schema: z.ZodType<Record<string, unknown>>;
+  args: (input: Record<string, unknown>) => string[];
+  transformOutput?: (data: unknown) => unknown;
+  longRunning?: boolean;
+};
+
+const user = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(/^[a-z][a-z0-9_-]*$/, "must be a valid HestiaCP user");
+const domain = z.string().min(1).max(253).toLowerCase();
+const format = z.enum(["json", "plain"]).default("json");
+const yesNo = z.enum(["yes", "no"]);
+const password = z.string().min(8).max(1024).describe("Sensitive value; never logged");
+const confirm = z.literal(true).describe("Explicit confirmation for a destructive operation");
+const text = (input: Record<string, unknown>, key: string): string => String(input[key]);
+const strings = (input: Record<string, unknown>, key: string): string[] => {
+  const value = input[key];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error(`${key} must be a string array`);
+  }
+  return value;
+};
+
+const SAFE_SYSTEM_CONFIG_FIELDS = [
+  "ANTISPAM_SYSTEM",
+  "ANTIVIRUS_SYSTEM",
+  "APP_NAME",
+  "BACKUP_SYSTEM",
+  "CRON_SYSTEM",
+  "DB_SYSTEM",
+  "DNS_SYSTEM",
+  "FILE_MANAGER",
+  "FIREWALL_SYSTEM",
+  "FTP_SYSTEM",
+  "IMAP_SYSTEM",
+  "LANGUAGE",
+  "MAIL_SYSTEM",
+  "PROXY_SYSTEM",
+  "RELEASE_BRANCH",
+  "STATS_SYSTEM",
+  "THEME",
+  "VERSION",
+  "WEB_BACKEND",
+  "WEB_SYSTEM"
+] as const;
+
+export function sanitizeSystemConfig(data: unknown): { config: Record<string, unknown> } {
+  if (
+    data === null ||
+    typeof data !== "object" ||
+    !("config" in data) ||
+    data.config === null ||
+    typeof data.config !== "object"
+  ) {
+    throw new Error("Unexpected v-list-sys-config response shape");
+  }
+
+  const config = data.config as Record<string, unknown>;
+  return {
+    config: Object.fromEntries(
+      SAFE_SYSTEM_CONFIG_FIELDS.flatMap((key) =>
+        Object.hasOwn(config, key) ? [[key, config[key]]] : []
+      )
+    )
+  };
+}
+
+function read(
+  name: string,
+  command: `v-${string}`,
+  description: string,
+  schema: z.ZodType<Record<string, unknown>>,
+  args: CommandSpec["args"]
+): CommandSpec {
+  return { name, command, description, safety: "read", idempotent: true, schema, args };
+}
+
+const userFormatSchema = z.object({ user, format });
+const userDomainFormatSchema = z.object({ user, domain, format });
+const databaseSchema = z.preprocess(
+  (input) => {
+    if (input !== null && typeof input === "object" && !("type" in input)) {
+      return { ...input, type: "mysql" };
+    }
+    return input;
+  },
+  z.discriminatedUnion("type", [
+    z.object({
+      user,
+      database: z.string().min(1).max(64),
+      databaseUser: z.string().min(1).max(64),
+      password,
+      type: z.literal("mysql"),
+      host: z.string().default(""),
+      charset: z.string().min(1).default("UTF8MB4")
+    }),
+    z.object({
+      user,
+      database: z.string().min(1).max(64),
+      databaseUser: z.string().min(1).max(64),
+      password,
+      type: z.literal("pgsql"),
+      host: z.string().default(""),
+      charset: z.string().min(1).default("UTF8")
+    })
+  ])
+);
+const toolOutputSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  data: z.json().optional(),
+  error: z
+    .object({
+      message: z.string(),
+      httpStatus: z.number().int().optional(),
+      exitCode: z.number().int().optional(),
+      outcomeUnknown: z.boolean()
+    })
+    .optional()
+});
+
+function errorDetails(
+  command: string,
+  error: unknown
+): {
+  ok: false;
+  command: string;
+  error: {
+    message: string;
+    httpStatus?: number;
+    exitCode?: number;
+    outcomeUnknown: boolean;
+  };
+} {
+  const message = safeError(error);
+  if (error instanceof HestiaApiError) {
+    return {
+      ok: false,
+      command,
+      error: {
+        message,
+        ...(error.httpStatus === undefined ? {} : { httpStatus: error.httpStatus }),
+        ...(error.exitCode === undefined ? {} : { exitCode: error.exitCode }),
+        outcomeUnknown: error.outcomeUnknown
+      }
+    };
+  }
+  return {
+    ok: false,
+    command,
+    error: { message, outcomeUnknown: false }
+  };
+}
+
+function formatError(details: ReturnType<typeof errorDetails>): string {
+  const metadata = [
+    details.command,
+    details.error.exitCode === undefined
+      ? undefined
+      : `Hestia exit ${String(details.error.exitCode)}`,
+    details.error.httpStatus === undefined
+      ? undefined
+      : `HTTP ${String(details.error.httpStatus)}`,
+    details.error.outcomeUnknown ? "outcome unknown" : undefined
+  ].filter((value): value is string => value !== undefined);
+  return `[${metadata.join(", ")}] ${details.error.message}`;
+}
+
+export const commandSpecs: readonly CommandSpec[] = [
+  read("list_users", "v-list-users", "List HestiaCP users.", z.object({ format }), (v) => [text(v, "format")]),
+  read("get_user", "v-list-user", "Get one HestiaCP user.", userFormatSchema, (v) => [text(v, "user"), text(v, "format")]),
+  read("list_web_domains", "v-list-web-domains", "List a user's web domains.", userFormatSchema, (v) => [text(v, "user"), text(v, "format")]),
+  read("get_web_domain", "v-list-web-domain", "Get one web domain.", userDomainFormatSchema, (v) => [text(v, "user"), text(v, "domain"), text(v, "format")]),
+  read("list_dns_domains", "v-list-dns-domains", "List a user's DNS zones.", userFormatSchema, (v) => [text(v, "user"), text(v, "format")]),
+  read("get_dns_domain", "v-list-dns-domain", "Get one DNS zone.", userDomainFormatSchema, (v) => [text(v, "user"), text(v, "domain"), text(v, "format")]),
+  read("list_dns_records", "v-list-dns-records", "List records in a DNS zone.", userDomainFormatSchema, (v) => [text(v, "user"), text(v, "domain"), text(v, "format")]),
+  read("list_mail_domains", "v-list-mail-domains", "List a user's mail domains.", userFormatSchema, (v) => [text(v, "user"), text(v, "format")]),
+  read("get_mail_domain", "v-list-mail-domain", "Get one mail domain.", userDomainFormatSchema, (v) => [text(v, "user"), text(v, "domain"), text(v, "format")]),
+  read("list_mail_accounts", "v-list-mail-accounts", "List accounts in a mail domain.", userDomainFormatSchema, (v) => [text(v, "user"), text(v, "domain"), text(v, "format")]),
+  read("list_databases", "v-list-databases", "List a user's databases.", userFormatSchema, (v) => [text(v, "user"), text(v, "format")]),
+  read("get_database", "v-list-database", "Get one database.", z.object({ user, database: z.string().min(1), format }), (v) => [text(v, "user"), text(v, "database"), text(v, "format")]),
+  read("list_cron_jobs", "v-list-cron-jobs", "List a user's cron jobs.", userFormatSchema, (v) => [text(v, "user"), text(v, "format")]),
+  read("list_user_backups", "v-list-user-backups", "List a user's backups.", userFormatSchema, (v) => [text(v, "user"), text(v, "format")]),
+  read("get_system_info", "v-list-sys-info", "Get HestiaCP system information.", z.object({ format }), (v) => [text(v, "format")]),
+  {
+    ...read(
+      "get_system_config",
+      "v-list-sys-config",
+      "Get an allowlisted, non-sensitive HestiaCP system configuration summary.",
+      z.object({}),
+      () => ["json"]
+    ),
+    transformOutput: sanitizeSystemConfig
+  },
+  read("list_system_services", "v-list-sys-services", "List system services and status.", z.object({ format }), (v) => [text(v, "format")]),
+  read("list_system_ips", "v-list-sys-ips", "List configured server IP addresses.", z.object({ format }), (v) => [text(v, "format")]),
+
+  {
+    name: "add_user", command: "v-add-user", description: "Create a HestiaCP user.", safety: "mutating",
+    schema: z.object({ user, password, email: z.email(), package: z.string().default("default"), firstName: z.string().max(64).default(""), lastName: z.string().max(64).default("") }),
+    args: (v) => [text(v, "user"), text(v, "password"), text(v, "email"), text(v, "package"), text(v, "firstName"), text(v, "lastName")]
+  },
+  {
+    name: "add_web_domain", command: "v-add-web-domain", description: "Create a web domain.", safety: "mutating",
+    schema: z.object({ user, domain, ip: z.string().default(""), restart: yesNo.default("yes"), aliases: z.string().default(""), proxyExtensions: z.string().default("") }),
+    args: (v) => [text(v, "user"), text(v, "domain"), text(v, "ip"), text(v, "restart"), text(v, "aliases"), text(v, "proxyExtensions")]
+  },
+  {
+    name: "issue_web_certificate", command: "v-add-letsencrypt-domain", description: "Issue or renew a Let's Encrypt certificate for a web domain.", safety: "mutating",
+    schema: z.object({ user, domain, aliases: z.string().default(""), includeMail: yesNo.default("no") }),
+    args: (v) => [text(v, "user"), text(v, "domain"), text(v, "aliases"), text(v, "includeMail")],
+    longRunning: true
+  },
+  {
+    name: "add_dns_domain", command: "v-add-dns-domain", description: "Create a DNS zone using HestiaCP defaults.", safety: "mutating",
+    schema: z.object({ user, domain, ip: z.string().min(1), nameservers: z.array(domain).max(8).default([]), restart: yesNo.default("yes") }),
+    args: (v) => {
+      const nameservers = strings(v, "nameservers");
+      return [text(v, "user"), text(v, "domain"), text(v, "ip"), ...nameservers, ...Array.from({ length: 8 - nameservers.length }, () => ""), text(v, "restart")];
+    }
+  },
+  {
+    name: "add_dns_record", command: "v-add-dns-record", description: "Add a record to an existing DNS zone.", safety: "mutating",
+    schema: z.object({ user, domain, record: z.string().min(1), type: z.enum(["A", "AAAA", "CAA", "CNAME", "DNSKEY", "MX", "NS", "PTR", "SRV", "TXT"]), value: z.string().min(1), priority: z.coerce.number().int().min(0).max(65535).default(10), id: z.string().default(""), restart: yesNo.default("yes"), ttl: z.coerce.number().int().min(60).max(604800).default(14400) }),
+    args: (v) => ["user", "domain", "record", "type", "value", "priority", "id", "restart", "ttl"].map((key) => text(v, key))
+  },
+  {
+    name: "add_mail_domain", command: "v-add-mail-domain", description: "Create a mail domain.", safety: "mutating",
+    schema: z.object({ user, domain, antispam: yesNo.default("yes"), antivirus: yesNo.default("yes"), dkim: yesNo.default("yes"), dkimSize: z.enum(["1024", "2048"]).default("2048"), restart: yesNo.default("yes"), rejectSpam: yesNo.default("no") }),
+    args: (v) => ["user", "domain", "antispam", "antivirus", "dkim", "dkimSize", "restart", "rejectSpam"].map((key) => text(v, key))
+  },
+  {
+    name: "add_mail_account", command: "v-add-mail-account", description: "Create a mailbox.", safety: "mutating",
+    schema: z.object({ user, domain, account: z.string().min(1).max(64), password, quota: z.union([z.literal("unlimited"), z.coerce.number().int().positive().transform(String)]).default("unlimited") }),
+    args: (v) => ["user", "domain", "account", "password", "quota"].map((key) => text(v, key))
+  },
+  {
+    name: "add_database", command: "v-add-database", description: "Create a database and database user.", safety: "mutating",
+    schema: databaseSchema,
+    args: (v) => ["user", "database", "databaseUser", "password", "type", "host", "charset"].map((key) => text(v, key))
+  },
+  {
+    name: "add_cron_job", command: "v-add-cron-job", description: "Create a cron job that executes an arbitrary shell command.", safety: "destructive",
+    schema: z.object({ user, minute: z.string().min(1), hour: z.string().min(1), day: z.string().min(1), month: z.string().min(1), weekday: z.string().min(1), command: z.string().min(1).max(4096), jobId: z.string().default(""), restart: yesNo.default("yes"), confirm }),
+    args: (v) => ["user", "minute", "hour", "day", "month", "weekday", "command", "jobId", "restart"].map((key) => text(v, key))
+  },
+  {
+    name: "backup_user", command: "v-backup-user", description: "Start a complete user backup.", safety: "mutating",
+    schema: z.object({ user, notify: yesNo.default("no") }),
+    args: (v) => [text(v, "user"), text(v, "notify")],
+    longRunning: true
+  },
+  {
+    name: "suspend_user", command: "v-suspend-user", description: "Suspend a user and their services.", safety: "destructive", idempotent: true,
+    schema: z.object({ user, restart: yesNo.default("yes"), confirm }),
+    args: (v) => [text(v, "user"), text(v, "restart")]
+  },
+  {
+    name: "unsuspend_user", command: "v-unsuspend-user", description: "Unsuspend a user and their services.", safety: "mutating", idempotent: true,
+    schema: z.object({ user, restart: yesNo.default("yes") }),
+    args: (v) => [text(v, "user"), text(v, "restart")]
+  },
+
+  ...([
+    ["delete_user", "v-delete-user", "Delete a user and all owned data.", z.object({ user, restart: yesNo.default("yes"), confirm }), (v: Record<string, unknown>) => [text(v, "user"), text(v, "restart")]],
+    ["delete_web_domain", "v-delete-web-domain", "Delete a web domain and its files.", z.object({ user, domain, restart: yesNo.default("yes"), confirm }), (v: Record<string, unknown>) => [text(v, "user"), text(v, "domain"), text(v, "restart")]],
+    ["delete_dns_domain", "v-delete-dns-domain", "Delete a DNS zone and all records.", z.object({ user, domain, confirm }), (v: Record<string, unknown>) => [text(v, "user"), text(v, "domain")]],
+    ["delete_dns_record", "v-delete-dns-record", "Delete a DNS record.", z.object({ user, domain, id: z.coerce.number().int().positive(), restart: yesNo.default("yes"), confirm }), (v: Record<string, unknown>) => [text(v, "user"), text(v, "domain"), text(v, "id"), text(v, "restart")]],
+    ["delete_mail_domain", "v-delete-mail-domain", "Delete a mail domain and all mailboxes.", z.object({ user, domain, confirm }), (v: Record<string, unknown>) => [text(v, "user"), text(v, "domain")]],
+    ["delete_mail_account", "v-delete-mail-account", "Delete a mailbox and its messages.", z.object({ user, domain, account: z.string().min(1), confirm }), (v: Record<string, unknown>) => [text(v, "user"), text(v, "domain"), text(v, "account")]],
+    ["delete_database", "v-delete-database", "Delete a database.", z.object({ user, database: z.string().min(1), confirm }), (v: Record<string, unknown>) => [text(v, "user"), text(v, "database")]],
+    ["delete_cron_job", "v-delete-cron-job", "Delete a cron job.", z.object({ user, jobId: z.coerce.number().int().positive(), confirm }), (v: Record<string, unknown>) => [text(v, "user"), text(v, "jobId")]]
+  ] as const).map(([name, command, description, schema, args]) => ({
+    name, command, description, schema, args, safety: "destructive" as const, idempotent: false
+  }))
+];
+
+export function createServer(
+  client: HestiaClient,
+  config: Pick<Config, "allowMutations" | "allowDestructive" | "longRunningTimeoutMs">
+): McpServer {
+  const server = new McpServer({ name: "hestiacp-mcp", version: "0.1.0" });
+
+  for (const spec of commandSpecs) {
+    server.registerTool(
+      spec.name,
+      {
+        title: spec.name.replaceAll("_", " "),
+        description: `${spec.description} Executes verified command ${spec.command}.`,
+        inputSchema: spec.schema,
+        outputSchema: toolOutputSchema,
+        annotations: {
+          readOnlyHint: spec.safety === "read",
+          destructiveHint: spec.safety === "destructive",
+          idempotentHint: spec.idempotent ?? spec.safety === "read",
+          openWorldHint: true
+        }
+      },
+      async (rawInput) => {
+        if (spec.safety !== "read" && !config.allowMutations) {
+          const details = errorDetails(
+            spec.command,
+            new Error("Mutating tools are disabled. Set HESTIACP_ALLOW_MUTATIONS=true to enable them.")
+          );
+          return {
+            isError: true,
+            content: [{ type: "text", text: formatError(details) }],
+            structuredContent: details
+          };
+        }
+        if (spec.safety === "destructive" && !config.allowDestructive) {
+          const details = errorDetails(
+            spec.command,
+            new Error("Destructive tools are disabled. Set HESTIACP_ALLOW_DESTRUCTIVE=true as well as HESTIACP_ALLOW_MUTATIONS=true.")
+          );
+          return {
+            isError: true,
+            content: [{ type: "text", text: formatError(details) }],
+            structuredContent: details
+          };
+        }
+
+        try {
+          const input = spec.schema.parse(rawInput);
+          const args = spec.args(input);
+          const result = spec.longRunning
+            ? await client.execute(spec.command, args, {
+                timeoutMs: config.longRunningTimeoutMs
+              })
+            : await client.execute(spec.command, args);
+          const data = spec.transformOutput?.(result.data) ?? result.data;
+          const structuredContent = { ok: true as const, command: spec.command, data };
+          return {
+            content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+            structuredContent
+          };
+        } catch (error) {
+          const details = errorDetails(spec.command, error);
+          return {
+            isError: true,
+            content: [{ type: "text", text: formatError(details) }],
+            structuredContent: details
+          };
+        }
+      }
+    );
+  }
+  return server;
+}
