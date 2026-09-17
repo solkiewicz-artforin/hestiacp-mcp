@@ -1,8 +1,9 @@
-import { McpServer } from "@modelcontextprotocol/server";
+import { McpServer, type RegisteredTool } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { HestiaApiError, type HestiaClient } from "./client.js";
 import type { Config } from "./config.js";
 import { safeError } from "./redact.js";
+import { allCommands, type CommandEntry } from "./generated/commands.js";
 
 type Safety = "read" | "mutating" | "destructive";
 type CommandSpec = {
@@ -79,6 +80,23 @@ export function sanitizeSystemConfig(data: unknown): { config: Record<string, un
     )
   };
 }
+
+/** Commands already hand-crafted as typed tool specs — skipped by the generated loop. */
+export const HANDCRAFTED_COMMANDS: ReadonlySet<string> = new Set([
+  "v-add-cron-job", "v-add-database", "v-add-dns-domain", "v-add-dns-record",
+  "v-add-letsencrypt-domain", "v-add-mail-account", "v-add-mail-domain",
+  "v-add-user", "v-add-web-domain", "v-backup-user", "v-delete-cron-job",
+  "v-delete-database", "v-delete-dns-domain", "v-delete-dns-record",
+  "v-delete-mail-account", "v-delete-mail-domain", "v-delete-user",
+  "v-delete-web-domain", "v-list-cron-jobs", "v-list-database",
+  "v-list-databases", "v-list-dns-domain", "v-list-dns-domains",
+  "v-list-dns-records", "v-list-mail-accounts",
+  "v-list-mail-domain", "v-list-mail-domains", "v-list-sys-config",
+  "v-list-sys-info", "v-list-sys-ips", "v-list-sys-services",
+  "v-list-user", "v-list-user-backups", "v-list-users",
+  "v-list-web-domain", "v-list-web-domains", "v-suspend-user",
+  "v-unsuspend-user"
+]);
 
 function read(
   name: string,
@@ -292,7 +310,7 @@ export const commandSpecs: readonly CommandSpec[] = [
 
 export function createServer(
   client: HestiaClient,
-  config: Pick<Config, "allowMutations" | "allowDestructive" | "longRunningTimeoutMs">
+  config: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem" | "longRunningTimeoutMs" | "toolProfile">
 ): McpServer {
   const server = new McpServer({ name: "hestiacp-mcp", version: "0.1.0" });
 
@@ -360,5 +378,262 @@ export function createServer(
       }
     );
   }
+
+
+// ── Generated tool helpers ────────────────────────────────────────────────
+
+function generatedSchema(entry: CommandEntry): z.ZodObject<Record<string, z.ZodType>> {
+  const shape: Record<string, z.ZodType> = {};
+  for (const arg of entry.args) {
+    if (arg.kind === "confirm") {
+      shape[arg.name] = z.literal(true);
+    } else if (arg.optional) {
+      shape[arg.name] = z.string().optional().describe(arg.name);
+    } else {
+      shape[arg.name] = z.string().min(1).describe(arg.name);
+    }
+  }
+  // Add confirm field for destructive and system risk classes
+  if (entry.risk === "destructive" || entry.risk === "system") {
+    if (!("confirm" in shape)) {
+      shape.confirm = z.literal(true).describe("Type true to confirm this potentially dangerous operation");
+    }
+  }
+  return z.object(shape);
+}
+
+function entryRiskClass(entry: CommandEntry): "read" | "mutating" | "destructive" | "system" {
+  return entry.risk;
+}
+
+function toolTitle(cmd: string): string {
+  return cmd.replace(/^v-/, "").replaceAll("-", " ");
+}
+
+function generatedDescription(entry: CommandEntry): string {
+  let desc = entry.description;
+  if (entry.notes) {
+    desc += ` (${entry.notes})`;
+  }
+  desc += ` Executes command ${entry.command}.`;
+  return desc;
+}
+
+function toolAnnotation(risk: string) {
+  return {
+    readOnlyHint: risk === "read",
+    destructiveHint: risk === "destructive" || risk === "system",
+    idempotentHint: risk === "read",
+    openWorldHint: true
+  };
+}
+
+function gateCheck(
+  risk: string,
+  cfg: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem">
+): string | null {
+  if (risk === "read") return null;
+  if (!cfg.allowMutations) {
+    return "Mutating tools are disabled. Set HESTIACP_ALLOW_MUTATIONS=true to enable them.";
+  }
+  if (risk === "mutating") return null;
+  if (!cfg.allowDestructive) {
+    return "Destructive tools are disabled. Set HESTIACP_ALLOW_DESTRUCTIVE=true as well as HESTIACP_ALLOW_MUTATIONS=true.";
+  }
+  if (risk === "system" && !cfg.allowSystem) {
+    return "System-level tools are disabled. Set HESTIACP_ALLOW_SYSTEM=true as well as HESTIACP_ALLOW_DESTRUCTIVE=true and HESTIACP_ALLOW_MUTATIONS=true.";
+  }
+  return null;
+}
+
+function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): string[] {
+  // v-make-tmp-file special case: arg1=content, arg2=filename
+  if (entry.command === "v-make-tmp-file") {
+    const content = typeof input.CONTENT === "string" ? input.CONTENT : "";
+    const filename = typeof input.FILENAME === "string" ? input.FILENAME : "";
+    return [content, filename];
+  }
+  const result: string[] = new Array<string>(entry.args.length).fill("");
+  for (let i = 0; i < entry.args.length; i++) {
+    const arg = entry.args[i];
+    if (!arg) continue;
+    const val: unknown = input[arg.name];
+    if (val !== undefined && val !== null) {
+      result[i] = typeof val === "string" ? val : JSON.stringify(val);
+    } else if (!arg.optional) {
+      throw new Error(`Missing required argument: ${arg.name} (position ${String(i + 1)})`);
+    }
+    // optional args missing stay as "" (placeholder)
+  }
+  // Trim trailing empty strings (API doesn't need them)
+  while (result.length > 0 && result[result.length - 1] === "") {
+    result.pop();
+  }
+  // Validate arg count
+  if (result.length > 13) {
+    throw new Error(`Too many arguments (${String(result.length)}). HestiaCP API limit is 13.`);
+  }
+  return result;
+}
+
+const generatedToolMap = new Map<string, RegisteredTool>();
+
+// Build TOOL_GROUPS dynamically from generated commands
+type ToolGroup = {
+  prefix: string;
+  description: string;
+}
+function buildToolGroups(): Record<string, ToolGroup> {
+  const groups: Record<string, ToolGroup> = {};
+  const seen = new Set<string>();
+  for (const c of allCommands) {
+    if (HANDCRAFTED_COMMANDS.has(c.command)) continue;
+    // Build 3-segment prefix: v-<action>-<target>
+    const parts = c.command.split("-");
+    if (parts.length >= 3) {
+      const prefix = parts.slice(0, 3).join("-");
+      if (!seen.has(prefix)) {
+        seen.add(prefix);
+        groups[prefix] = { prefix, description: `Tools for ${prefix}` };
+      }
+    }
+  }
+  return groups;
+}
+const TOOL_GROUPS = buildToolGroups();
+
+  // ── Generated tool registration ──────────────────────────────────────────
+  const enabledGenerated = new Set<string>();
+  const profile = config.toolProfile;
+
+  for (const entry of allCommands) {
+    if (HANDCRAFTED_COMMANDS.has(entry.command)) continue;
+
+    const schema: z.ZodObject<Record<string, z.ZodType>> = generatedSchema(entry);
+    const risk = entryRiskClass(entry);
+    // Register all, but immediately disable if profile === "curated"
+    const tool = server.registerTool(
+      entry.command,
+      {
+        title: toolTitle(entry.command),
+        description: generatedDescription(entry),
+        inputSchema: schema,
+        outputSchema: toolOutputSchema,
+        annotations: toolAnnotation(risk)
+      },
+      async (rawInput: unknown) => {
+        const blockMsg = gateCheck(risk, config);
+        if (blockMsg !== null) {
+          const details = errorDetails(entry.command, new Error(blockMsg));
+          return {
+            isError: true,
+            content: [{ type: "text", text: formatError(details) }],
+            structuredContent: details
+          };
+        }
+
+        try {
+          const input = schema.parse(rawInput);
+          const args = generatedArgs(entry, input);
+          const result = await client.execute(entry.command, args);
+          const structuredContent = { ok: true as const, command: entry.command, data: result.data };
+          return {
+            content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }],
+            structuredContent
+          };
+        } catch (error) {
+          const details = errorDetails(entry.command, error);
+          return {
+            isError: true,
+            content: [{ type: "text", text: formatError(details) }],
+            structuredContent: details
+          };
+        }
+      }
+    );
+
+    generatedToolMap.set(entry.command, tool);
+    if (profile === "curated") {
+      tool.disable();
+    } else {
+      enabledGenerated.add(entry.command);
+    }
+  }
+
+  // ── Meta-tools (always registered, always read-only) ─────────────────────
+  server.registerTool(
+    "list_tool_groups",
+    {
+      title: "list tool groups",
+      description: "List all auto-generated tool group prefixes that can be managed via set_tool_group.",
+      inputSchema: z.object({}),
+      outputSchema: toolOutputSchema,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    () => {
+      const groups = Object.entries(TOOL_GROUPS).map(([, g]) => {
+        const cmds = allCommands.filter(
+          (c) => !HANDCRAFTED_COMMANDS.has(c.command) && c.command.startsWith(g.prefix)
+        );
+        const active = cmds.filter((c) => enabledGenerated.has(c.command));
+        return {
+          prefix: g.prefix,
+          description: g.description,
+          total: cmds.length,
+          enabled: active.length
+        };
+      });
+      const structuredContent = {
+        ok: true as const,
+        command: "list_tool_groups",
+        data: { groups }
+      };
+      return {
+        content: [{ type: "text", text: JSON.stringify(groups, null, 2) }],
+        structuredContent
+      };
+    }
+  );
+
+  server.registerTool(
+    "set_tool_group",
+    {
+      title: "set tool group",
+      description: "Enable or disable all auto-generated tools matching a given prefix. Use list_tool_groups to see available prefixes.",
+      inputSchema: z.object({
+        prefix: z.string().min(1).describe("Tool group prefix (e.g. 'v-list-sys', 'v-add-web-domain')"),
+        enabled: z.boolean().describe("true to enable, false to disable")
+      }),
+      outputSchema: toolOutputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+    },
+    (rawInput: unknown) => {
+      const params = rawInput as { prefix: string; enabled: boolean };
+      const { prefix, enabled: enable } = params;
+      const matched: string[] = [];
+      for (const [cmdName, tool] of generatedToolMap) {
+        if (cmdName.startsWith(prefix)) {
+          if (enable) {
+            tool.enable();
+            enabledGenerated.add(cmdName);
+          } else {
+            tool.disable();
+            enabledGenerated.delete(cmdName);
+          }
+          matched.push(cmdName);
+        }
+      }
+      const structuredContent = {
+        ok: true as const,
+        command: "set_tool_group",
+        data: { prefix, enabled: enable, matchedCount: matched.length, matched }
+      };
+      return {
+        content: [{ type: "text", text: `${enable ? "Enabled" : "Disabled"} ${String(matched.length)} tools matching '${prefix}'` }],
+        structuredContent
+      };
+    }
+  );
+
   return server;
 }

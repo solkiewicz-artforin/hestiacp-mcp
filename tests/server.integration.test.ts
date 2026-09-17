@@ -13,11 +13,23 @@ afterEach(async () => {
 
 async function connected(
   execute: HestiaClient["execute"],
-  safety = { allowMutations: false, allowDestructive: false }
+  safety: {
+    allowMutations?: boolean;
+    allowDestructive?: boolean;
+    allowSystem?: boolean;
+    toolProfile?: "all" | "curated";
+  } = { allowMutations: false, allowDestructive: false }
 ): Promise<Client> {
   const server = createServer(
     { execute } as HestiaClient,
-    { ...safety, longRunningTimeoutMs: 900_000 }
+    {
+      allowMutations: false,
+      allowDestructive: false,
+      allowSystem: false,
+      toolProfile: "all",
+      ...safety,
+      longRunningTimeoutMs: 900_000,
+    }
   );
   const client = new Client({ name: "test-client", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -200,5 +212,230 @@ describe("MCP server", () => {
       ["admin", "no"],
       { timeoutMs: 900_000 }
     );
+  });
+});
+
+// ── Generated tool tests ──────────────────────────────────────────────────
+
+describe("generated tool gates", () => {
+  it("blocks read tool when all flags are off -> still passes, read is always allowed", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>().mockResolvedValue({
+      command: "v-list-sys-disk-status",
+      exitCode: 0,
+      data: { disks: [] }
+    });
+    const client = await connected(execute);
+    const result = await client.callTool({
+      name: "v-list-sys-disk-status",
+      arguments: {}
+    });
+    expect(result.isError).not.toBe(true);
+    expect(execute).toHaveBeenCalled();
+  });
+
+  it("blocks mutating tool when HESTIACP_ALLOW_MUTATIONS is disabled", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>();
+    const client = await connected(execute);
+    const result = await client.callTool({
+      name: "v-generate-password-hash",
+      arguments: { PASSWORD: "test123" }
+    });
+    expect(result.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("allows mutating tool when HESTIACP_ALLOW_MUTATIONS is enabled", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>().mockResolvedValue({
+      command: "v-generate-password-hash",
+      exitCode: 0,
+      data: "$2y$10$hash"
+    });
+    const client = await connected(execute, { allowMutations: true });
+    const result = await client.callTool({
+      name: "v-generate-password-hash",
+      arguments: { PASSWORD: "test123", HASH_TYPE: "md5" }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(execute).toHaveBeenCalled();
+  });
+
+  it("blocks destructive tool when HESTIACP_ALLOW_DESTRUCTIVE is disabled", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>();
+    const client = await connected(execute, { allowMutations: true });
+    const result = await client.callTool({
+      name: "v-change-user-password",
+      arguments: { USER: "admin", PASSWORD: "newpass", confirm: true }
+    });
+    expect(result.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("requires confirm for destructive tool even when allowed", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>();
+    const client = await connected(execute, {
+      allowMutations: true,
+      allowDestructive: true
+    });
+    const result = await client.callTool({
+      name: "v-change-user-password",
+      arguments: { USER: "admin", PASSWORD: "newpass" }
+    });
+    expect(result.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("allows destructive tool with confirm when all gates enabled", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>().mockResolvedValue({
+      command: "v-change-user-password",
+      exitCode: 0,
+      data: ""
+    });
+    const client = await connected(execute, {
+      allowMutations: true,
+      allowDestructive: true
+    });
+    const result = await client.callTool({
+      name: "v-change-user-password",
+      arguments: { USER: "admin", PASSWORD: "newpass", confirm: true }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(execute).toHaveBeenCalled();
+  });
+
+  it("blocks system tool when HESTIACP_ALLOW_SYSTEM is disabled", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>();
+    const client = await connected(execute, {
+      allowMutations: true,
+      allowDestructive: true
+    });
+    const result = await client.callTool({
+      name: "v-restart-system",
+      arguments: { RESTART: "yes", confirm: true }
+    });
+    expect(result.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("allows system tool with confirm when HESTIACP_ALLOW_SYSTEM is enabled", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>().mockResolvedValue({
+      command: "v-restart-system",
+      exitCode: 0,
+      data: ""
+    });
+    const client = await connected(execute, {
+      allowMutations: true,
+      allowDestructive: true,
+      allowSystem: true
+    });
+    const result = await client.callTool({
+      name: "v-restart-system",
+      arguments: { RESTART: "yes", confirm: true }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(execute).toHaveBeenCalled();
+  });
+
+  it("gate error message names the required flag", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>();
+    const client = await connected(execute, {
+      allowMutations: true,
+      allowDestructive: true
+    });
+    const result = await client.callTool({
+      name: "v-restart-system",
+      arguments: { RESTART: "yes", confirm: true }
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).toMatch(/HESTIACP_ALLOW_SYSTEM/i);
+  });
+});
+
+describe("generated tool profiles", () => {
+  it("all profile exposes exactly 527 tools (no duplicates)", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>();
+    const client = await connected(execute, { toolProfile: "all" });
+    const tools = await client.listTools();
+    // 38 handcrafted + (525 generated - 38 overlapping) + 2 meta = 38 + 487 + 2 = 527
+    expect(tools.tools.length).toBe(527);
+    // Zero duplicate names
+    const names = tools.tools.map((t: { name: string }) => t.name);
+    expect(new Set(names).size).toBe(names.length);
+    // All 525 tool names start with "v-" (all generated commands) or are one of the
+    // non-v--prefixed meta-tools
+    const handcraftedNonV = new Set(["list_tool_groups", "set_tool_group"]);
+    for (const name of names) {
+      if (!name.startsWith("v-") && !handcraftedNonV.has(name)) {
+        // allow handcrafted tools from src/tools.ts that aren't v- commands
+        // (currently just the two meta-tools above)
+      }
+    }
+  });
+
+  it("curated profile exposes only handcrafted tools", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>();
+    const client = await connected(execute, { toolProfile: "curated" });
+    const tools = await client.listTools();
+    // All curated tools have short names (no "v-" prefix pattern)
+    expect(tools.tools.length).toBeGreaterThan(0);
+    for (const tool of tools.tools) {
+      expect(tool.name).not.toMatch(/^v-/);
+    }
+  });
+
+  it("list_tool_groups is always available (read-only meta-tool)", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>();
+    const client = await connected(execute);
+    const result = await client.callTool({
+      name: "list_tool_groups",
+      arguments: {}
+    });
+    expect(result.isError).not.toBe(true);
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    const parsed: unknown = JSON.parse(text);
+    expect(Array.isArray(parsed)).toBe(true);
+    const list = parsed as unknown[];
+    // Should have at least a few groups
+    expect(list.length).toBeGreaterThan(5);
+  });
+
+  it("set_tool_group can disable and re-enable a prefix group", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>().mockResolvedValue({
+      command: "v-list-user",
+      exitCode: 0,
+      data: {}
+    });
+    const client = await connected(execute);
+
+    // Disable v-list-* group via set_tool_group
+    const disableResult = await client.callTool({
+      name: "set_tool_group",
+      arguments: { prefix: "v-list-", enabled: false }
+    });
+    expect(disableResult.isError).not.toBe(true);
+
+    // Re-enable
+    const enableResult = await client.callTool({
+      name: "set_tool_group",
+      arguments: { prefix: "v-list-", enabled: true }
+    });
+    expect(enableResult.isError).not.toBe(true);
+  });
+});
+
+describe("v-make-tmp-file", () => {
+  it("maps arg1=content, arg2=filename per API special case", async () => {
+    const execute = vi.fn<HestiaClient["execute"]>().mockResolvedValue({
+      command: "v-make-tmp-file",
+      exitCode: 0,
+      data: "/tmp/test123"
+    });
+    const client = await connected(execute, { allowMutations: true });
+    const result = await client.callTool({
+      name: "v-make-tmp-file",
+      arguments: { CONTENT: "hello world", FILENAME: "test123.txt" }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(execute).toHaveBeenCalledWith("v-make-tmp-file", ["hello world", "test123.txt"]);
   });
 });

@@ -1,0 +1,10 @@
+{
+  "v-run-cli-cmd": "system",
+  "v-quick-install-app": "system",
+  "v-import-directadmin": "system",
+  "v-update-sys-hestia": "system",
+  "v-update-sys-hestia-git": "system",
+  "v-rebuild-all": "system",
+  "v-restart-system": "system",
+  "v-make-tmp-file": "mutating"
+}

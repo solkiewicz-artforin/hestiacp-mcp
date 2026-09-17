@@ -21,7 +21,9 @@
     "test": "npm run build && vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "validate": "npm run lint && npm run typecheck && npm test"
+    "validate": "npm run lint && npm run typecheck && npm test",
+    "generate:commands": "node scripts/generate-commands.mjs",
+    "check:generated": "npm run generate:commands -- --upstream /tmp/hestiacp-upstream && git diff --exit-code -- src/generated/"
   },
   "engines": {
     "node": ">=20.18.1"

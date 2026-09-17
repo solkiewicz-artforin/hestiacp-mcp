@@ -47,7 +47,9 @@ The server communicates only over stdin/stdout. Diagnostics go to stderr so they
 | `HESTIACP_MAX_RESPONSE_BYTES` | no | `1000000` | Maximum accepted response size. |
 | `HESTIACP_TLS_REJECT_UNAUTHORIZED` | no | `true` | TLS certificate and hostname verification. Disabling is for isolated development only. |
 | `HESTIACP_ALLOW_MUTATIONS` | no | `false` | Enables additive and state-changing tools. |
-| `HESTIACP_ALLOW_DESTRUCTIVE` | no | `false` | Enables destructive tools; mutations must also be enabled. |
+| `HESTIACP_ALLOW_DESTRUCTIVE` | no | `false` | Enables destructive tools. |
+| `HESTIACP_ALLOW_SYSTEM` | no | `false` | Enables system-level tools (panel/service infrastructure, service restarts, panel updates). **See Security below.** |
+| `HESTIACP_TOOL_PROFILE` | no | `all` | Tool visibility: `all` (525 tools) or `curated` (38 handcrafted only). |
 
 For a private CA, keep verification enabled and launch Node with `NODE_EXTRA_CA_CERTS=/absolute/path/to/ca.pem`. The API URL may not contain embedded credentials. Cross-origin and same-origin HTTP redirects are rejected to prevent credential forwarding.
 
@@ -75,7 +77,48 @@ For a globally installed package, use `"command": "hestiacp-mcp"` and omit `args
 
 ## Tools
 
-All tools map to commands present in the HestiaCP upstream `bin/` directory. Schemas preserve the exact positional order expected by `/api/`, including empty placeholders for later optional arguments.
+### Command catalog — 525 tools (full HestiaCP `v-*` surface)
+
+The server exposes every HestiaCP command available in the upstream `bin/` directory, generated from upstream commit `cd81897dce279ed13945d25bfbaf0be604a9d413`:
+
+| Source | Count |
+|---|---|
+| Handcrafted (curated, hand-typed schemas) | 38 |
+| Auto-registered (generated from upstream `bin/`) | 487 |
+| **Total** | **525** |
+
+Schemas preserve the exact positional order expected by `/api/`, including empty placeholders for later optional arguments. All commands are registered as individual MCP tools — there is no generic command executor.
+
+#### Risk classes and gates
+
+Every command is classified into one of four risk tiers. **No command is ever hard-blocked** — each class is reachable via its environment flag. The decision belongs to the operator.
+
+| Class | Prefix / heuristic | Count | Env flag | Confirm? |
+|---|---|---|---|---|
+| **read** | `list`, `search`, `get`, `check`, `show`, `display`, `view`, `is`, `status`, `test`, `open` | 119 | *(always on)* | No |
+| **mutating** | `add`, `copy`, `import`, `backup`, `schedule`, `generate`, `move`, `rename`, `create`, `upload`, `export`, `download`, `sync` | 104 | `HESTIACP_ALLOW_MUTATIONS=true` | No |
+| **destructive** | `delete`, `change`, `update`, `rebuild`, `restart`, `suspend`, `unsuspend`, `restore`, `remove`, `replace`, `set`, `enable`, `disable`, `start`, `stop`, `purge`, `flush`, `clean`, `repair`, `revoke` | 225 | `HESTIACP_ALLOW_DESTRUCTIVE=true` | **Yes** |
+| **system** | `-sys-` / `-hestia-` (panel/service infrastructure) or manual override | 77 | `HESTIACP_ALLOW_SYSTEM=true` | **Yes** |
+
+Classification priority (decreasing): manual overrides → read-prefix (even with `-sys-`) → system marker → destructive prefix → mutating prefix → **generator error** (no silent fallback for unknown commands).
+
+When a class is disabled, the tool is still registered but returns an `isError` result with a clear message naming the required flag. Destructive and system tools additionally require a `confirm: true` literal argument.
+
+#### Meta-tools (always read-only)
+
+- `list_tool_groups` — enumerate all tools grouped by risk class and command family
+- `set_tool_group` — enable or disable an entire family of tools at runtime (e.g. `v-delete-web-domain-*`)
+
+#### Tool profile
+
+The `HESTIACP_TOOL_PROFILE` variable controls how many tools are visible to the client:
+
+| Value | Tools visible | Use case |
+|---|---|---|
+| `all` (default) | 525 | Full server management |
+| `curated` | 38 handcrafted only | Emergency fallback; minimal context with untrusted agents |
+
+### Handcrafted tools (subset of 38, curated profile)
 
 **Read-only (enabled by default):**
 
@@ -131,6 +174,27 @@ Destructive example:
 }
 ```
 
+### Pinned upstream version
+
+The command catalog was generated from HestiaCP upstream commit
+[`cd81897dce279ed13945d25bfbaf0be604a9d413`](https://github.com/hestiacp/hestiacp/commit/cd81897dce279ed13945d25bfbaf0be604a9d413).
+When a new panel release ships, regenerate the catalog against the updated `bin/` directory.
+
+### Regenerating the command catalog
+
+```bash
+# Clone upstream once:
+git clone https://github.com/hestiacp/hestiacp /tmp/hestiacp-upstream
+cd /tmp/hestiacp-upstream && git checkout cd81897dce279ed13945d25bfbaf0be604a9d413
+
+# Generate (from project root):
+npm run generate:commands -- --upstream /tmp/hestiacp-upstream
+
+# Commit the updated src/generated/commands.json
+```
+
+A CI workflow checks that `src/generated/` matches the pinned upstream commit so stale catalogs are detected automatically.
+
 ## Docker
 
 Build the image:
@@ -158,6 +222,7 @@ Mount a private CA read-only and set `NODE_EXTRA_CA_CERTS` when required.
 - Tool results include structured `ok`, `command`, `data` or sanitized error metadata (`httpStatus`, Hestia `exitCode`, `outcomeUnknown`) in addition to text for client compatibility.
 - Access keys and password-named data are never intentionally logged. Avoid placing secrets directly in shell history or committed MCP configuration.
 - HestiaCP command signatures are shell-script interfaces and can change between releases. Test upgrades against a staging panel before production rollout.
+- `v-open-fs-file` and `v-open-fs-config` are read-only tools but can return the contents of sensitive files such as `/etc/shadow` or service configuration files containing passwords. Their output is passed through the same secret-redaction pipeline applied to all tool responses, but exercise caution when enabling these tools for agents.
 
 ## Development
 

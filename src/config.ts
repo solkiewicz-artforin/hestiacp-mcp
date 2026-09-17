@@ -5,6 +5,8 @@ const booleanString = (defaultValue: "true" | "false") =>
     .preprocess((value) => value ?? defaultValue, z.enum(["true", "false", "1", "0"]))
     .transform((value) => value === "true" || value === "1");
 
+const toolProfileSchema = z.enum(["all", "curated"]).default("all");
+
 const envSchema = z.object({
   HESTIACP_URL: z.url().transform((value) => new URL(value)),
   HESTIACP_ACCESS_KEY: z.string().min(1),
@@ -19,6 +21,8 @@ const envSchema = z.object({
   HESTIACP_TLS_REJECT_UNAUTHORIZED: booleanString("true"),
   HESTIACP_ALLOW_MUTATIONS: booleanString("false"),
   HESTIACP_ALLOW_DESTRUCTIVE: booleanString("false"),
+  HESTIACP_ALLOW_SYSTEM: booleanString("false"),
+  HESTIACP_TOOL_PROFILE: toolProfileSchema,
   HESTIACP_MAX_RESPONSE_BYTES: z.coerce
     .number()
     .int()
@@ -36,6 +40,8 @@ export type Config = {
   tlsRejectUnauthorized: boolean;
   allowMutations: boolean;
   allowDestructive: boolean;
+  allowSystem: boolean;
+  toolProfile: "all" | "curated";
   maxResponseBytes: number;
 };
 
@@ -70,6 +76,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tlsRejectUnauthorized: result.data.HESTIACP_TLS_REJECT_UNAUTHORIZED,
     allowMutations: result.data.HESTIACP_ALLOW_MUTATIONS,
     allowDestructive: result.data.HESTIACP_ALLOW_DESTRUCTIVE,
+    allowSystem: result.data.HESTIACP_ALLOW_SYSTEM,
+    toolProfile: result.data.HESTIACP_TOOL_PROFILE,
     maxResponseBytes: result.data.HESTIACP_MAX_RESPONSE_BYTES
   };
 }

@@ -1,0 +1,51 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # Monday mornings
+  workflow_dispatch:
+
+jobs:
+  check-generated:
+    runs-on: ubuntu-latest
+    env:
+      HESTIACP_UPSTREAM_REPO: hestiacp/hestiacp
+      HESTIACP_UPSTREAM_REF: cd81897dce279ed13945d25bfbaf0be604a9d413
+    steps:
+      - name: Check network
+        id: checknet
+        run: |
+          if curl -fsS --connect-timeout 5 https://github.com > /dev/null 2>&1; then
+            echo "online=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "online=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.checknet.outputs.online == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.checknet.outputs.online == 'true'
+        with:
+          node-version: 22
+
+      - name: Clone upstream at pinned commit
+        if: steps.checknet.outputs.online == 'true'
+        run: |
+          git clone --depth 1 --no-tags \
+            "https://github.com/${{ env.HESTIACP_UPSTREAM_REPO }}.git" \
+            /tmp/hestiacp-upstream
+          cd /tmp/hestiacp-upstream
+          git fetch --depth 1 origin "${{ env.HESTIACP_UPSTREAM_REF }}"
+          git checkout "${{ env.HESTIACP_UPSTREAM_REF }}"
+
+      - name: Regenerate and check for drift
+        if: steps.checknet.outputs.online == 'true'
+        run: |
+          node scripts/generate-commands.mjs --upstream /tmp/hestiacp-upstream
+          git diff --exit-code -- src/generated/
+
+      - name: Skip (no network)
+        if: steps.checknet.outputs.online == 'false'
+        run: |
+          echo "::warning::Network unavailable — skipping upstream sync. This step cannot be run offline."
