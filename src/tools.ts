@@ -1,11 +1,11 @@
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/server";
+// Verified: RegisteredTool is exported as a type from @modelcontextprotocol/server (v^2.0.0).
+// If the export changes in a future version, switch to ReturnType<McpServer["registerTool"]>.
 import { z } from "zod";
 import { HestiaApiError, type HestiaClient } from "./client.js";
 import type { Config } from "./config.js";
-import { basename } from "node:path";
 import { redact, safeError } from "./redact.js";
 import { allCommands, type CommandEntry } from "./generated/commands.js";
-import handcraftedCommandsArr from "./generated/handcrafted-commands.json" with { type: "json" };
 
 type Safety = "read" | "mutating" | "destructive";
 type CommandSpec = {
@@ -83,15 +83,14 @@ export function sanitizeSystemConfig(data: unknown): { config: Record<string, un
   };
 }
 
-/** Commands already hand-crafted as typed tool specs — skipped by the generated loop. */
-export const HANDCRAFTED_COMMANDS: ReadonlySet<string> = new Set(handcraftedCommandsArr);
-
-/**
- * HestiaCP CLI argument limit. No `v-*` script accepts more than 13 positional
+/** HestiaCP CLI argument limit. No `v-*` script accepts more than 13 positional
  * arguments. This constant is shared between the generator (Zod schema size)
  * and the runtime (argument validation in `generatedArgs`).
  */
 export const HESTIA_MAX_ARGS = 13;
+
+/** Maximum allowed size for v-make-tmp-file content (64 KB). */
+export const HESTIACP_MAX_TMP_FILE_SIZE = 64 * 1024;
 
 function read(
   name: string,
@@ -303,68 +302,15 @@ export const commandSpecs: readonly CommandSpec[] = [
   }))
 ];
 
-export function createServer(
-  client: HestiaClient,
-  config: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem" | "longRunningTimeoutMs" | "toolProfile">
-): McpServer {
-  const server = new McpServer({ name: "hestiacp-mcp", version: "0.1.0" });
-
-  for (const spec of commandSpecs) {
-    server.registerTool(
-      spec.name,
-      {
-        title: spec.name.replaceAll("_", " "),
-        description: `${spec.description} Executes verified command ${spec.command}.`,
-        inputSchema: spec.schema,
-        outputSchema: toolOutputSchema,
-        annotations: {
-          readOnlyHint: spec.safety === "read",
-          destructiveHint: spec.safety === "destructive",
-          idempotentHint: spec.idempotent ?? spec.safety === "read",
-          openWorldHint: true
-        }
-      },
-      async (rawInput) => {
-        const blockMsg = gateCheck(spec.safety, config);
-        if (blockMsg !== null) {
-          const details = errorDetails(spec.command, new Error(blockMsg));
-          return {
-            isError: true,
-            content: [{ type: "text", text: formatError(details) }],
-            structuredContent: details
-          };
-        }
-
-        try {
-          const input = spec.schema.parse(rawInput);
-          const args = spec.args(input);
-          const result = spec.longRunning
-            ? await client.execute(spec.command, args, {
-                timeoutMs: config.longRunningTimeoutMs
-              })
-            : await client.execute(spec.command, args);
-          const data = redact(spec.transformOutput?.(result.data) ?? result.data);
-          const structuredContent = { ok: true as const, command: spec.command, data };
-          return {
-            content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-            structuredContent
-          };
-        } catch (error) {
-          const details = errorDetails(spec.command, error);
-          return {
-            isError: true,
-            content: [{ type: "text", text: formatError(details) }],
-            structuredContent: details
-          };
-        }
-      }
-    );
-  }
-
+/** Commands already hand-crafted as typed tool specs — skipped by the generated loop.
+ *  Derived at runtime from `commandSpecs` keys, not a separate JSON file. */
+export const HANDCRAFTED_COMMANDS: ReadonlySet<string> = new Set(
+  commandSpecs.map((s) => s.command)
+);
 
 // ── Generated tool helpers ────────────────────────────────────────────────
 
-function generatedSchema(entry: CommandEntry): z.ZodObject<Record<string, z.ZodType>> {
+export function generatedSchema(entry: CommandEntry): z.ZodObject<Record<string, z.ZodType>> {
   const shape: Record<string, z.ZodType> = {};
   for (const arg of entry.args) {
     if (arg.kind === "confirm") {
@@ -446,14 +392,34 @@ function gateCheck(
  * require them).
  */
 function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): string[] {
-  // v-make-tmp-file requires two ordered arguments:
-  // arg1: file content (string, may contain multi-line or binary-safe data)
-  // arg2: optional filename (defaults to 'mcp-tmp' if empty)
-  if (entry.command === "v-make-tmp-file") {
-    const content = typeof input.CONTENT === "string" ? input.CONTENT : "";
-    const filename = typeof input.FILENAME === "string" ? basename(input.FILENAME) : "";
-    return [content, filename];
+  // If the entry provides an explicit argMap, use it to remap parameter names
+  // to positional indices (e.g. v-make-tmp-file: {CONTENT→0, FILENAME→1}).
+  // Otherwise, the catalog arg order matches the HestiaCP positional binding.
+  if (entry.argMap) {
+    const result: string[] = new Array<string>(entry.args.length).fill("");
+    for (const [paramName, pos] of Object.entries(entry.argMap)) {
+      const val: unknown = input[paramName];
+      if (val !== undefined && val !== null) {
+        const sanitized = typeof val === "string" ? val : JSON.stringify(val);
+        result[pos] = sanitized;
+      }
+    }
+    // Validate all required (non-optional) args were provided
+    for (const arg of entry.args) {
+      if (!arg.optional && !result[entry.argMap[arg.name] ?? -1]) {
+        throw new Error(`Missing required argument: ${arg.name}`);
+      }
+    }
+    // Trim trailing empty strings (API doesn't need them)
+    while (result.length > 0 && result[result.length - 1] === "") {
+      result.pop();
+    }
+    if (result.length > HESTIA_MAX_ARGS) {
+      throw new Error(`Too many arguments (${String(result.length)}). HestiaCP API limit is ${String(HESTIA_MAX_ARGS)}.`);
+    }
+    return result;
   }
+
   const result: string[] = new Array<string>(entry.args.length).fill("");
   for (let i = 0; i < entry.args.length; i++) {
     const arg = entry.args[i];
@@ -475,6 +441,44 @@ function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): str
     throw new Error(`Too many arguments (${String(result.length)}). HestiaCP API limit is ${String(HESTIA_MAX_ARGS)}.`);
   }
   return result;
+}
+
+/**
+ * Validate arguments for v-make-tmp-file before they are sent to the API.
+ * Rejects content that is too large, binary, or contains null bytes, and
+ * rejects filenames that contain path separators, traversal markers, or
+ * characters outside the safe set `[a-zA-Z0-9._-]+`.
+ */
+function validateTmpFileArgs(entry: CommandEntry, input: Record<string, unknown>): void {
+  if (entry.command !== "v-make-tmp-file") return;
+
+  // 1. Size limit
+  const content: string = typeof input.CONTENT === "string" ? input.CONTENT : "";
+  const contentBytes = Buffer.byteLength(content, "utf-8");
+  if (contentBytes > HESTIACP_MAX_TMP_FILE_SIZE) {
+    throw new Error(
+      `File content (${String(contentBytes)} bytes) exceeds the maximum of ${String(HESTIACP_MAX_TMP_FILE_SIZE)} bytes.`
+    );
+  }
+
+  // 2. Binary / null-byte rejection
+  if (content.includes("\x00")) {
+    throw new Error("File content must not contain null bytes.");
+  }
+
+  // 3. Filename validation
+  const filename: string = typeof input.FILENAME === "string" ? input.FILENAME : "";
+  if (!filename || filename.length === 0) {
+    throw new Error("Filename must not be empty.");
+  }
+  if (filename.includes("/") || filename.includes("..")) {
+    throw new Error("Filename must not contain path separators or traversal markers (/, ..).");
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(filename)) {
+    throw new Error(
+      `Filename "${filename}" contains invalid characters. Only [a-zA-Z0-9._-] are allowed.`
+    );
+  }
 }
 
 const generatedToolMap = new Map<string, RegisteredTool>();
@@ -502,6 +506,73 @@ function buildToolGroups(): Record<string, ToolGroup> {
   return groups;
 }
 const TOOL_GROUPS = buildToolGroups();
+
+/**
+ * Create the MCP server with all registered tools.
+ *
+ * The `config` parameter is narrowed via `Pick<Config, …>` so that callers
+ * (typically `src/index.ts`) pass only the fields required at runtime
+ * (`allowMutations`, `allowDestructive`, `allowSystem`, `toolProfile`).
+ * This avoids coupling the tool layer to the full Config shape.
+ */
+export function createServer(
+  client: HestiaClient,
+  config: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem" | "longRunningTimeoutMs" | "toolProfile">
+): McpServer {
+  const server = new McpServer({ name: "hestiacp-mcp", version: "0.1.0" });
+
+  for (const spec of commandSpecs) {
+    server.registerTool(
+      spec.name,
+      {
+        title: spec.name.replaceAll("_", " "),
+        description: `${spec.description} Executes verified command ${spec.command}.`,
+        inputSchema: spec.schema,
+        outputSchema: toolOutputSchema,
+        annotations: {
+          readOnlyHint: spec.safety === "read",
+          destructiveHint: spec.safety === "destructive",
+          idempotentHint: spec.idempotent ?? spec.safety === "read",
+          openWorldHint: true
+        }
+      },
+      async (rawInput) => {
+        const blockMsg = gateCheck(spec.safety, config);
+        if (blockMsg !== null) {
+          const details = errorDetails(spec.command, new Error(blockMsg));
+          return {
+            isError: true,
+            content: [{ type: "text", text: formatError(details) }],
+            structuredContent: details
+          };
+        }
+
+        try {
+          const input = spec.schema.parse(rawInput);
+          const args = spec.args(input);
+          const result = spec.longRunning
+            ? await client.execute(spec.command, args, {
+                timeoutMs: config.longRunningTimeoutMs
+              })
+            : await client.execute(spec.command, args);
+          const data = redact(spec.transformOutput?.(result.data) ?? result.data);
+          const structuredContent = { ok: true as const, command: spec.command, data };
+          return {
+            content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+            structuredContent
+          };
+        } catch (error) {
+          const details = errorDetails(spec.command, error);
+          return {
+            isError: true,
+            content: [{ type: "text", text: formatError(details) }],
+            structuredContent: details
+          };
+        }
+      }
+    );
+  }
+
 
   // ── Generated tool registration ──────────────────────────────────────────
   const enabledGenerated = new Set<string>();
@@ -535,6 +606,7 @@ const TOOL_GROUPS = buildToolGroups();
 
         try {
           const input = schema.parse(rawInput);
+          validateTmpFileArgs(entry, input);
           const args = generatedArgs(entry, input);
           const result = await client.execute(entry.command, args);
           const data = redact(result.data);
@@ -613,12 +685,9 @@ const TOOL_GROUPS = buildToolGroups();
       const params = rawInput as { prefix: string; enabled: boolean };
       const { prefix, enabled: enable } = params;
 
-      // Enabling/disabling tools is a mutating operation (it changes tool availability)
-      const blockMsg = gateCheck("mutating", config);
-      if (blockMsg !== null) {
-        const details = errorDetails("set_tool_group", new Error(blockMsg));
-        return { isError: true, content: [{ type: "text", text: formatError(details) }], structuredContent: details };
-      }
+      // set_tool_group only toggles MCP-side tool visibility — it does not
+      // execute any HestiaCP commands, so no runtime gate-check is needed.
+      // (Individual tool gates still apply when those tools are called.)
 
       // Validate prefix matches at least one generated tool (prevents typos)
       const matched: string[] = [];

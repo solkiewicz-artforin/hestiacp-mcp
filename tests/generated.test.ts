@@ -176,6 +176,23 @@ describe("generated command catalog", () => {
       expect(entry.args.length).toBeLessThanOrEqual(13);
     });
   }
+
+  // ── Schema smoke test (review finding #9) ──
+
+  it("generatedSchema produces valid Zod schemas for all 525 entries", async () => {
+    const { generatedSchema } = await import("../src/tools.js");
+    for (const entry of allCommands) {
+      // Every entry must yield an object with a .parse() method
+      const schema = generatedSchema(entry);
+      expect(typeof (schema as unknown as { parse: (v: unknown) => unknown }).parse).toBe("function");
+
+      // Calling .safeParse({}) must not throw — safeParse never throws
+      // (unlike .parse() which throws ZodError on required args)
+      expect(() => {
+        (schema as unknown as { safeParse: (v: unknown) => unknown }).safeParse({});
+      }).not.toThrow();
+    }
+  });
 });
 
 // ── Determinism of codegen ─────────────────────────────────────────────────

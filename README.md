@@ -84,7 +84,7 @@ The server exposes every HestiaCP command available in the upstream `bin/` direc
 | Source | Count |
 |---|---|
 | Handcrafted (curated, hand-typed schemas) | 38 |
-| Auto-registered (generated from upstream `bin/`) | 487 |
+| Auto-registered (generated from upstream `bin/`) | 487+ |
 | **Total** | **525** |
 
 Schemas preserve the exact positional order expected by `/api/`, including empty placeholders for later optional arguments. All commands are registered as individual MCP tools — there is no generic command executor.

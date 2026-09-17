@@ -85,10 +85,10 @@ const HANDCRAFTED_COMMANDS = new Set(handcraftedCommandsArr);
  */
 function sanitizeDescription(raw) {
   return raw
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')   // control chars (keep \t, \n)
+    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '') // keep \t, \n, \r   // control chars (keep \t, \n)
     .replace(/```[^]*?```/gs, '')                          // markdown code blocks
     .replace(/\[.*?\]\(javascript:/gi, '[link](')                    // javascript: URIs
-    .replace(/\{\{[{}]*\}\}/g, '')                                // double-brace injection
+    .replace(/\{\{[^{}]*\}\}/g, '')                                // double-brace injection
     .replace(/\n{3,}/g, '\n\n')                                      // collapse long newline runs
     .trim();
 }
@@ -197,7 +197,7 @@ function parseScript(filePath) {
     args,
     risk: null, // filled later
     notes: "",  // filled later
-    usage_example: exampleRaw || "",
+    usage_example: sanitizeDescription(exampleRaw || ""),
     stdin: (name === "v-delete-sys-mail-queue" || name === "v-update-sys-hestia-git"),
     fileArg: false // filled later
   };
@@ -238,7 +238,14 @@ try {
 let overrides = {};
 const envOverrides = process.env.HESTIACP_RISK_OVERRIDES;
 if (envOverrides) {
-  overrides = JSON.parse(envOverrides);
+  try {
+    overrides = JSON.parse(envOverrides);
+  } catch (err) {
+    console.error(`Error parsing HESTIACP_RISK_OVERRIDES: ${err.message}`);
+    process.exit(1);
+  }
+  // Parse overrides but defer risk-downgrade validation until commands are
+  // populated (the validation loop references `commands`).
 } else if (values.riskOverrides) {
   overrides = JSON.parse(readFileSync(values.riskOverrides, "utf-8"));
 } else {
@@ -274,6 +281,21 @@ if (!values.noApiPseudo) {
   for (const pseudo of API_PSEUDO_COMMANDS) {
     pseudo.risk = classifyRisk(pseudo.name, overrides);
     commands.push(pseudo);
+  }
+}
+
+// Validate no risk-level downgrades (destructive→mutating, system→read) unless --force
+if (Object.keys(overrides).length > 0 && !values.force) {
+  const riskSeverity = { destructive: 3, system: 3, mutating: 2, read: 1 };
+  for (const [cmd, level] of Object.entries(overrides)) {
+    const cmdObj = commands.find((c) => c.command === cmd);
+    if (cmdObj && riskSeverity[level] < riskSeverity[cmdObj.risk]) {
+      console.error(
+        `Risk override for "${cmd}" downgrades risk from "${cmdObj.risk}" to "${level}". ` +
+        `Use --force to allow this.`
+      );
+      process.exit(1);
+    }
   }
 }
 
