@@ -2,8 +2,10 @@ import { McpServer, type RegisteredTool } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { HestiaApiError, type HestiaClient } from "./client.js";
 import type { Config } from "./config.js";
-import { safeError } from "./redact.js";
+import { basename } from "node:path";
+import { redact, safeError } from "./redact.js";
 import { allCommands, type CommandEntry } from "./generated/commands.js";
+import handcraftedCommandsArr from "./generated/handcrafted-commands.json" with { type: "json" };
 
 type Safety = "read" | "mutating" | "destructive";
 type CommandSpec = {
@@ -82,21 +84,14 @@ export function sanitizeSystemConfig(data: unknown): { config: Record<string, un
 }
 
 /** Commands already hand-crafted as typed tool specs — skipped by the generated loop. */
-export const HANDCRAFTED_COMMANDS: ReadonlySet<string> = new Set([
-  "v-add-cron-job", "v-add-database", "v-add-dns-domain", "v-add-dns-record",
-  "v-add-letsencrypt-domain", "v-add-mail-account", "v-add-mail-domain",
-  "v-add-user", "v-add-web-domain", "v-backup-user", "v-delete-cron-job",
-  "v-delete-database", "v-delete-dns-domain", "v-delete-dns-record",
-  "v-delete-mail-account", "v-delete-mail-domain", "v-delete-user",
-  "v-delete-web-domain", "v-list-cron-jobs", "v-list-database",
-  "v-list-databases", "v-list-dns-domain", "v-list-dns-domains",
-  "v-list-dns-records", "v-list-mail-accounts",
-  "v-list-mail-domain", "v-list-mail-domains", "v-list-sys-config",
-  "v-list-sys-info", "v-list-sys-ips", "v-list-sys-services",
-  "v-list-user", "v-list-user-backups", "v-list-users",
-  "v-list-web-domain", "v-list-web-domains", "v-suspend-user",
-  "v-unsuspend-user"
-]);
+export const HANDCRAFTED_COMMANDS: ReadonlySet<string> = new Set(handcraftedCommandsArr);
+
+/**
+ * HestiaCP CLI argument limit. No `v-*` script accepts more than 13 positional
+ * arguments. This constant is shared between the generator (Zod schema size)
+ * and the runtime (argument validation in `generatedArgs`).
+ */
+export const HESTIA_MAX_ARGS = 13;
 
 function read(
   name: string,
@@ -330,22 +325,9 @@ export function createServer(
         }
       },
       async (rawInput) => {
-        if (spec.safety !== "read" && !config.allowMutations) {
-          const details = errorDetails(
-            spec.command,
-            new Error("Mutating tools are disabled. Set HESTIACP_ALLOW_MUTATIONS=true to enable them.")
-          );
-          return {
-            isError: true,
-            content: [{ type: "text", text: formatError(details) }],
-            structuredContent: details
-          };
-        }
-        if (spec.safety === "destructive" && !config.allowDestructive) {
-          const details = errorDetails(
-            spec.command,
-            new Error("Destructive tools are disabled. Set HESTIACP_ALLOW_DESTRUCTIVE=true as well as HESTIACP_ALLOW_MUTATIONS=true.")
-          );
+        const blockMsg = gateCheck(spec.safety, config);
+        if (blockMsg !== null) {
+          const details = errorDetails(spec.command, new Error(blockMsg));
           return {
             isError: true,
             content: [{ type: "text", text: formatError(details) }],
@@ -361,7 +343,7 @@ export function createServer(
                 timeoutMs: config.longRunningTimeoutMs
               })
             : await client.execute(spec.command, args);
-          const data = spec.transformOutput?.(result.data) ?? result.data;
+          const data = redact(spec.transformOutput?.(result.data) ?? result.data);
           const structuredContent = { ok: true as const, command: spec.command, data };
           return {
             content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -446,11 +428,30 @@ function gateCheck(
   return null;
 }
 
+/**
+ * Build the positional argument array for a generated command invocation.
+ *
+ * HestiaCP uses positional CLI binding: every index maps to a specific argument,
+ * and empty strings act as placeholders for missing optional arguments.
+ *
+ * **Known limitation (#24):** When an optional argument at position N is omitted
+ * but a required argument at position N+1 is provided, the array keeps an empty
+ * string at position N. The HestiaCP CLI treats `""` as a valid (empty) positional
+ * value, which may have unintended side-effects for certain commands. This is a
+ * fundamental constraint of positional argument encoding — the only workaround
+ * would be per-command arg-remapping (as done for v-make-tmp-file). No upstream
+ * 0pen-source `v-*` script exhibits this pathological ordering for mandatory args.
+ *
+ * Trailing empty strings are trimmed before invocation (the HestiaCP API does not
+ * require them).
+ */
 function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): string[] {
-  // v-make-tmp-file special case: arg1=content, arg2=filename
+  // v-make-tmp-file requires two ordered arguments:
+  // arg1: file content (string, may contain multi-line or binary-safe data)
+  // arg2: optional filename (defaults to 'mcp-tmp' if empty)
   if (entry.command === "v-make-tmp-file") {
     const content = typeof input.CONTENT === "string" ? input.CONTENT : "";
-    const filename = typeof input.FILENAME === "string" ? input.FILENAME : "";
+    const filename = typeof input.FILENAME === "string" ? basename(input.FILENAME) : "";
     return [content, filename];
   }
   const result: string[] = new Array<string>(entry.args.length).fill("");
@@ -463,15 +464,15 @@ function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): str
     } else if (!arg.optional) {
       throw new Error(`Missing required argument: ${arg.name} (position ${String(i + 1)})`);
     }
-    // optional args missing stay as "" (placeholder)
+    // optional args missing stay as "" (placeholder — see JSDoc above)
   }
   // Trim trailing empty strings (API doesn't need them)
   while (result.length > 0 && result[result.length - 1] === "") {
     result.pop();
   }
   // Validate arg count
-  if (result.length > 13) {
-    throw new Error(`Too many arguments (${String(result.length)}). HestiaCP API limit is 13.`);
+  if (result.length > HESTIA_MAX_ARGS) {
+    throw new Error(`Too many arguments (${String(result.length)}). HestiaCP API limit is ${String(HESTIA_MAX_ARGS)}.`);
   }
   return result;
 }
@@ -536,9 +537,10 @@ const TOOL_GROUPS = buildToolGroups();
           const input = schema.parse(rawInput);
           const args = generatedArgs(entry, input);
           const result = await client.execute(entry.command, args);
-          const structuredContent = { ok: true as const, command: entry.command, data: result.data };
+          const data = redact(result.data);
+          const structuredContent = { ok: true as const, command: entry.command, data };
           return {
-            content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
             structuredContent
           };
         } catch (error) {
@@ -610,9 +612,19 @@ const TOOL_GROUPS = buildToolGroups();
     (rawInput: unknown) => {
       const params = rawInput as { prefix: string; enabled: boolean };
       const { prefix, enabled: enable } = params;
+
+      // Enabling/disabling tools is a mutating operation (it changes tool availability)
+      const blockMsg = gateCheck("mutating", config);
+      if (blockMsg !== null) {
+        const details = errorDetails("set_tool_group", new Error(blockMsg));
+        return { isError: true, content: [{ type: "text", text: formatError(details) }], structuredContent: details };
+      }
+
+      // Validate prefix matches at least one generated tool (prevents typos)
       const matched: string[] = [];
       for (const [cmdName, tool] of generatedToolMap) {
         if (cmdName.startsWith(prefix)) {
+          matched.push(cmdName);
           if (enable) {
             tool.enable();
             enabledGenerated.add(cmdName);
@@ -620,9 +632,14 @@ const TOOL_GROUPS = buildToolGroups();
             tool.disable();
             enabledGenerated.delete(cmdName);
           }
-          matched.push(cmdName);
         }
       }
+
+      if (matched.length === 0) {
+        const details = errorDetails("set_tool_group", new Error(`No generated tools match prefix '${prefix}'. Use list_tool_groups to see valid prefixes.`));
+        return { isError: true, content: [{ type: "text", text: formatError(details) }], structuredContent: details };
+      }
+
       const structuredContent = {
         ok: true as const,
         command: "set_tool_group",

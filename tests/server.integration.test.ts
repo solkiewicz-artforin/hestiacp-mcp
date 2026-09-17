@@ -405,7 +405,7 @@ describe("generated tool profiles", () => {
       exitCode: 0,
       data: {}
     });
-    const client = await connected(execute);
+    const client = await connected(execute, { allowMutations: true });
 
     // Disable v-list-* group via set_tool_group
     const disableResult = await client.callTool({

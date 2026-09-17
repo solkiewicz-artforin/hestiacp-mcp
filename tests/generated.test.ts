@@ -32,6 +32,32 @@ describe("generated command catalog", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
+  // ── Handcrafted / generated consistency (review findings #8, #22, #26) ──
+
+  it("handcrafted commands exactly match typed CommandSpec commands", async () => {
+    const { HANDCRAFTED_COMMANDS, commandSpecs } = await import("../src/tools.js");
+    const handcraftedSet = new Set(HANDCRAFTED_COMMANDS);
+    const specSet = new Set(commandSpecs.map((s) => s.command));
+
+    // Every handcrafted command must have a typed CommandSpec
+    const missingSpec = [...handcraftedSet].filter(
+      (h) => !specSet.has(h as `v-${string}`)
+    );
+    expect(missingSpec).toEqual([]);
+
+    // Every typed CommandSpec must be listed in HANDCRAFTED_COMMANDS
+    // (otherwise the generated loop would also register it → duplicate tool)
+    const unlistedSpec = [...specSet].filter((s) => !handcraftedSet.has(s));
+    expect(unlistedSpec).toEqual([]);
+  });
+
+  it("every handcrafted command exists in the upstream catalog", async () => {
+    const { HANDCRAFTED_COMMANDS } = await import("../src/tools.js");
+    const upstreamNames = new Set(allCommands.map((c) => c.command));
+    const missing = [...HANDCRAFTED_COMMANDS].filter((h) => !upstreamNames.has(h));
+    expect(missing).toEqual([]);
+  });
+
   it("has Snapshot risk-class counts matching commands.json", () => {
     const counts = { read: 0, mutating: 0, destructive: 0, system: 0 };
     for (const entry of allCommands) {

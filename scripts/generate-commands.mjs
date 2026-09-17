@@ -13,8 +13,15 @@
 
 import { parseArgs } from "node:util";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+
+/**
+ * HestiaCP CLI argument limit. No `v-*` script accepts more than 13
+ * positional arguments. Must match HESTIA_MAX_ARGS in src/tools.ts
+ */
+const MAX_ARGS = 13;
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import handcraftedCommandsArr from "../src/generated/handcrafted-commands.json" with { type: "json" };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -65,46 +72,26 @@ const API_PSEUDO_COMMANDS = [
 ];
 
 // ── Handcrafted tool names to exclude from auto-registration ───────────────
-const HANDCRAFTED_COMMANDS = new Set([
-  "v-list-users",
-  "v-list-user",
-  "v-list-web-domains",
-  "v-list-web-domain",
-  "v-list-dns-domains",
-  "v-list-dns-domain",
-  "v-list-dns-records",
-  "v-list-mail-domains",
-  "v-list-mail-domain",
-  "v-list-mail-accounts",
-  "v-list-databases",
-  "v-list-database",
-  "v-list-cron-jobs",
-  "v-list-user-backups",
-  "v-list-sys-info",
-  "v-list-sys-config",
-  "v-list-sys-services",
-  "v-list-sys-ips",
-  "v-add-user",
-  "v-add-web-domain",
-  "v-add-letsencrypt-domain",
-  "v-add-dns-domain",
-  "v-add-dns-record",
-  "v-add-mail-domain",
-  "v-add-mail-account",
-  "v-add-database",
-  "v-backup-user",
-  "v-unsuspend-user",
-  "v-suspend-user",
-  "v-add-cron-job",
-  "v-delete-user",
-  "v-delete-web-domain",
-  "v-delete-dns-domain",
-  "v-delete-dns-record",
-  "v-delete-mail-domain",
-  "v-delete-mail-account",
-  "v-delete-database",
-  "v-delete-cron-job"
-]);
+const HANDCRAFTED_COMMANDS = new Set(handcraftedCommandsArr);
+
+// ── Sanitization ───────────────────────────────────────────────────────────
+
+/**
+ * Sanitize a `# info:` description to prevent prompt injection.
+ *
+ * HestiaCP script info headers flow directly into MCP tool descriptions
+ * consumed by LLMs. Malicious upstream text could be interpreted as agent
+ * instructions. Strip control chars, code fences, and double-brace injection.
+ */
+function sanitizeDescription(raw) {
+  return raw
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')   // control chars (keep \t, \n)
+    .replace(/```[^]*?```/gs, '')                          // markdown code blocks
+    .replace(/\[.*?\]\(javascript:/gi, '[link](')                    // javascript: URIs
+    .replace(/\{\{[{}]*\}\}/g, '')                                // double-brace injection
+    .replace(/\n{3,}/g, '\n\n')                                      // collapse long newline runs
+    .trim();
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -200,7 +187,7 @@ function parseScript(filePath) {
   const optionsRaw = extractHeader(lines, "options");
   const exampleRaw = extractHeader(lines, "example");
 
-  let description = info || `${name}`;
+  let description = sanitizeDescription(info || `${name}`);
   const args = optionsRaw ? parseArgsFromHeader(`# options: ${optionsRaw}`) : [];
 
   return {
@@ -269,11 +256,11 @@ for (const script of scripts) {
   const filePath = join(binDir, script);
   const cmd = parseScript(filePath);
 
-  // Validate argument count before risk classification (hard limit: 13 args)
-  if (cmd.args.length > 13) {
+  // Validate argument count before risk classification (hard limit: MAX_ARGS args)
+  if (cmd.args.length > MAX_ARGS) {
     throw new Error(
-      `Command "${cmd.name}" has ${cmd.args.length} arguments, which exceeds the API limit of 13. ` +
-      `The HestiaCP REST API truncates all arguments beyond the 13th position.`
+      `Command "${cmd.name}" has ${cmd.args.length} arguments, which exceeds the API limit of ${MAX_ARGS}. ` +
+      `The HestiaCP REST API truncates all arguments beyond the ${MAX_ARGS}th position.`
     );
   }
   cmd.risk = classifyRisk(cmd.name, overrides);
