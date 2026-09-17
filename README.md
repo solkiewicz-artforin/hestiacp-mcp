@@ -213,6 +213,19 @@ Mount a private CA read-only and set `NODE_EXTRA_CA_CERTS` when required.
 
 ## Security notes
 
+> **⚠️ Warning — destructive and system risk classes**
+>
+> The `destructive` and `system` risk classes include **irreversible operations** that can
+> delete data, break the hosting panel, or damage the server itself. When these classes are
+> enabled via `HESTIACP_ALLOW_DESTRUCTIVE` / `HESTIACP_ALLOW_SYSTEM`, an AI agent **can
+> execute them without asking a human for confirmation** (the `confirm: true` argument is a
+> machine-readable guard, not a human-in-the-loop prompt).
+>
+> **Recommendation for less-trusted agents:** use a dedicated, restricted HestiaCP API key
+> (non-admin, IP-allowlisted) together with `HESTIACP_TOOL_PROFILE=curated` so only the
+> 38 hand-crafted tools are visible. Enable destructive or system access only for fully
+> trusted, supervised automation.
+
 - Use a dedicated non-admin access key, a restrictive HestiaCP API profile, server-side IP allowlisting, and firewall restrictions on port 8083.
 - Keep TLS verification enabled. The permissive TLS settings in historical HestiaCP examples are not suitable for production.
 - Mutation and deletion are off by default. Destructive tools also require a literal confirmation argument.
