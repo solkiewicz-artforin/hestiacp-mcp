@@ -193,6 +193,15 @@ npm run generate:commands -- --upstream /tmp/hestiacp-upstream
 # Commit the updated src/generated/commands.json
 ```
 
+Generator flags:
+- `--upstream <path>` — path to a HestiaCP checkout (required)
+- `--force` — overwrite `commands.json` even if it already exists
+- `--noApiPseudo` — skip emitting pseudo-tools (e.g. `v-log-api`); useful for
+  generating a catalog that matches an older HestiaCP release
+- `--riskOverrides <path>` — path to a JSON file with per-risk overrides (e.g.
+  `{ "v-restart-service": "safe" }`); overrides take precedence over
+  auto-classified risk
+
 A CI workflow checks that `src/generated/` matches the pinned upstream commit so stale catalogs are detected automatically.
 
 ## Docker
@@ -229,6 +238,24 @@ Mount a private CA read-only and set `NODE_EXTRA_CA_CERTS` when required.
 - Use a dedicated non-admin access key, a restrictive HestiaCP API profile, server-side IP allowlisting, and firewall restrictions on port 8083.
 - Keep TLS verification enabled. The permissive TLS settings in historical HestiaCP examples are not suitable for production.
 - Mutation and deletion are off by default. Destructive tools also require a literal confirmation argument.
+
+### Audit trail signals
+
+The command generator and runtime components emit tagged audit messages on stderr
+for troubleshooting and compliance reviews:
+
+| Tag | Origin | Meaning |
+|---|---|---|
+| `[asanitize]` | `generate-commands.mjs` | An unsafe pattern was stripped from a command description during catalog generation |
+| `[adowngrade]` | `generate-commands.mjs` | A command's auto-classified risk was downgraded (e.g. `destructive` → `read`); requires `--force` |
+| `[astartup]` | `tools.ts` (startup) | Schema validation warning during MCP server initialization |
+
+These messages are structured for log aggregation and can be piped through
+`grep` for quick audits:
+
+```bash
+npm run generate:commands -- --upstream /tmp/hestiacp-upstream 2> >(grep '\[a' > audit.log)
+```
 - Commands are allowlisted and validated; there is no generic `cmd` tool.
 - Requests have bounded duration and response size, never retry mutations automatically, and reject redirects.
 - Backups and certificate issuance use the separate long-running timeout. A timeout is reported as an unknown remote outcome; inspect HestiaCP state before retrying.
@@ -263,3 +290,7 @@ Tests use mocked HTTP responses and linked in-memory MCP transports; they do not
 - Only the documented, verified subset above is exposed; HestiaCP has hundreds of additional `v-*` commands.
 - The test suite mocks HestiaCP. Operators should run smoke tests against their exact supported HestiaCP version.
 - Stdio is the only transport. Authentication and network exposure remain between this local process and HestiaCP; the MCP server itself does not listen on a network socket.
+- **`v-make-tmp-file` filename validation**: the tool rejects filenames that are
+  `"."`, `".."`, or contain path separators (`/`, `\\`), characters likely to be
+  shell-interpreted (`$`, `` ` ``), or whitespace. This is stricter than upstream
+  to prevent path traversal and command injection.
