@@ -18,7 +18,7 @@ const SECRET_KEYS_RE = new RegExp(
 
 /** Regex matching sensitive key=value patterns in error strings. */
 const SAFE_ERROR_SENSITIVE_RE = new RegExp(
-  `(\\b(?:${SENSITIVE_KEY_NAMES.map((k) => `${k}_?(?:key)?`).join("|")})\\b\\s*[=:]\\s*)("[^"]*"|'[^']*'|[^\\s,;]+)`,
+  `(\\b(?:-{1,2})?(?:${SENSITIVE_KEY_NAMES.map((k) => `${k}_?(?:key)?`).join("|")})\\b\\s*(?:[=:]\\s*)?\\s*)("[^"]*"|'[^']*'|[^\\s,;]+)`,
   "gi"
 );
 
@@ -26,32 +26,25 @@ const SAFE_ERROR_SENSITIVE_RE = new RegExp(
  * Recursively redacts values of sensitive keys from an object or array.
  *
  * Replaces values whose key matches a known sensitive name with `"[REDACTED]"`.
- * Supports nested objects, arrays, and primitive values. Uses a WeakSet to
- * detect and safely handle circular references.
+ * Supports nested objects, arrays, and primitive values. Input is always
+ * acyclic (flat command results), so no cycle detection is needed.
  *
  * @param value - The value to redact. Can be any JSON-serializable type.
- * @param seen  - Internal WeakSet used to track visited objects for cycle detection.
  * @returns A deep copy with sensitive values replaced.
  */
-export function redact(value: unknown, seen = new WeakSet()): unknown {
+export function redact(value: unknown): unknown {
   if (value === null || typeof value !== "object") {
     return value;
   }
 
-  // Cycle detection: return a placeholder for already-visited objects.
-  if (seen.has(value)) {
-    return "[CIRCULAR]";
-  }
-  seen.add(value);
-
   if (Array.isArray(value)) {
-    return value.map((item) => redact(item, seen));
+    return value.map((item) => redact(item));
   }
 
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => [
       key,
-      SECRET_KEYS_RE.test(key) ? "[REDACTED]" : redact(item, seen)
+      SECRET_KEYS_RE.test(key) ? "[REDACTED]" : redact(item)
     ])
   );
 }
