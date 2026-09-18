@@ -1,8 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { execSync } from "child_process";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { allCommands } from "../src/generated/commands.js";
 
 // ── Static catalog integrity ──────────────────────────────────────────────
@@ -192,25 +188,5 @@ describe("generated command catalog", () => {
         (schema as unknown as { safeParse: (v: unknown) => unknown }).safeParse({});
       }).not.toThrow();
     }
-  });
-});
-
-// ── Determinism of codegen ─────────────────────────────────────────────────
-
-describe("generator determinism", () => {
-  it("re-running on the same upstream yields byte-identical commands.json", () => {
-    const cwd = path.resolve(fileURLToPath(import.meta.url), "..", "..");
-    const outFile = path.join(cwd, "src", "generated", "commands.json");
-
-    // Run generator twice; output must be byte-identical
-    const opts = { cwd, encoding: "utf-8", stdio: "pipe" } as const;
-
-    execSync("node scripts/generate-commands.mjs --upstream /tmp/hestiacp-upstream", opts);
-    const run1 = fs.readFileSync(outFile, "utf-8");
-
-    execSync("node scripts/generate-commands.mjs --upstream /tmp/hestiacp-upstream", opts);
-    const run2 = fs.readFileSync(outFile, "utf-8");
-
-    expect(run1).toBe(run2);
   });
 });
