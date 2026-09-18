@@ -198,10 +198,10 @@ describe("generated command catalog", () => {
 
   // ── Deeper schema assertions (LOW #13) ─────────────────────────────
 
-  it("__generatedSchema adds confirm field for destructive and system entries", async () => {
-    const { __generatedSchema } = await import("../src/tools.js");
+  it("_generatedSchema adds confirm field for destructive and system entries", async () => {
+    const { _generatedSchema } = await import("../src/tools.js");
     for (const entry of allCommands) {
-      const schema = __generatedSchema(entry);
+      const schema = _generatedSchema(entry);
       const shape = schema.shape;
       if (entry.risk === "destructive" || entry.risk === "system") {
         expect(shape).toHaveProperty("confirm");
@@ -214,10 +214,10 @@ describe("generated command catalog", () => {
     }
   });
 
-  it("__generatedSchema maps every declared arg into a Zod shape key", async () => {
-    const { __generatedSchema } = await import("../src/tools.js");
+  it("_generatedSchema maps every declared arg into a Zod shape key", async () => {
+    const { _generatedSchema } = await import("../src/tools.js");
     for (const entry of allCommands) {
-      const schema = __generatedSchema(entry);
+      const schema = _generatedSchema(entry);
       const shape = schema.shape;
       for (const arg of entry.args) {
         expect(shape, `${entry.command}: missing key ${arg.name}`).toHaveProperty(arg.name);
@@ -225,10 +225,10 @@ describe("generated command catalog", () => {
     }
   });
 
-  it("__generatedSchema required args produce non-optional Zod types", async () => {
-    const { __generatedSchema } = await import("../src/tools.js");
+  it("_generatedSchema required args produce non-optional Zod types", async () => {
+    const { _generatedSchema } = await import("../src/tools.js");
     for (const entry of allCommands) {
-      const schema = __generatedSchema(entry);
+      const schema = _generatedSchema(entry);
       const shape = schema.shape;
       for (const arg of entry.args) {
         if (!arg.optional) {
@@ -241,12 +241,12 @@ describe("generated command catalog", () => {
 
   // Schema smoke: safeParse({}) fails for required args, succeeds for optional-only
   it("safeParse({}) schema smoke test", async () => {
-    const { __generatedSchema } = await import("../src/tools.js");
+    const { _generatedSchema } = await import("../src/tools.js");
     const { allCommands } = await import("../src/generated/commands.js");
 
     for (const entry of allCommands) {
-      const result = __generatedSchema(entry).safeParse({});
-      // __generatedSchema adds mandatory `confirm: z.literal(true)` for destructive/system
+      const result = _generatedSchema(entry).safeParse({});
+      // _generatedSchema adds mandatory `confirm: z.literal(true)` for destructive/system
       const hasHiddenRequired = entry.risk === "destructive" || entry.risk === "system";
       const hasVisibleRequired = entry.args.some((a) => !a.optional);
       const hasRequired = hasVisibleRequired || hasHiddenRequired;
