@@ -5,7 +5,7 @@ const booleanString = (defaultValue: "true" | "false") =>
     .preprocess((value) => value ?? defaultValue, z.enum(["true", "false", "1", "0"]))
     .transform((value) => value === "true" || value === "1");
 
-const toolProfileSchema = z.enum(["all", "curated"]).default("all");
+const toolProfileSchema = z.enum(["all", "curated"]).default("curated");
 
 const envSchema = z.object({
   HESTIACP_URL: z.url().transform((value) => new URL(value)),

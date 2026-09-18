@@ -28,6 +28,9 @@ export type CommandEntry = {
   usage_example: string;
   stdin: boolean;
   fileArg: boolean;
+  /** Optional map from parameter names to positional argument indices (0-based).
+   *  Used when HestiaCP positional binding differs from the catalog arg order. */
+  argMap?: Record<string, number>;
 }
 
 /** The full catalog structure (deterministic — no timestamps or paths) */
