@@ -251,13 +251,13 @@ echo "${name} ran"
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("errors on completely unknown operation prefix (no fallback)", () => {
+  it("defaults unknown operation prefix to mutating with a warning", () => {
     const dir = scratchUpstream([
       { name: "v-foobar-something", info: "Unknown operation", options: "THING" },
     ]);
-    expect(() => runGenerator(dir)).toThrow(
-      /un(matched|known|classifiable)|no risk|cannot classify/i
-    );
+    const catalog = runGenerator(dir);
+    const cmd = findCmd(catalog, "v-foobar-something");
+    expect(cmd.risk).toBe("mutating");
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

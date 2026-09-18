@@ -34,6 +34,23 @@ describe("generated command catalog", () => {
 
   // ── Handcrafted / generated consistency (review findings #8, #22, #26) ──
 
+  it("HANDCRAFTED_COMMANDS exactly matches handcrafted-commands.json file", async () => {
+    const { HANDCRAFTED_COMMANDS } = await import("../src/tools.js");
+    const handcraftedJson = await import("../src/commands/handcrafted-commands.json", {
+      with: { type: "json" },
+    });
+    const jsonCommands = new Set(handcraftedJson.default);
+    const handcraftedSet = new Set(HANDCRAFTED_COMMANDS);
+
+    // Every JSON entry must be in HANDCRAFTED_COMMANDS
+    const missingFromSet = [...jsonCommands].filter((h) => !handcraftedSet.has(h));
+    expect(missingFromSet).toEqual([]);
+
+    // Every HANDCRAFTED_COMMANDS entry must be in the JSON file
+    const missingFromJson = [...handcraftedSet].filter((h) => !jsonCommands.has(h));
+    expect(missingFromJson).toEqual([]);
+  });
+
   it("handcrafted commands exactly match typed CommandSpec commands", async () => {
     const { HANDCRAFTED_COMMANDS, commandSpecs } = await import("../src/tools.js");
     const handcraftedSet = new Set(HANDCRAFTED_COMMANDS);
@@ -177,20 +194,23 @@ describe("generated command catalog", () => {
     });
   }
 
-  // ── Schema smoke test (review finding #9) ──
+  // Schema smoke: safeParse({}) fails for required args, succeeds for optional-only
+  it("safeParse({}) schema smoke test", async () => {
+    const { __generatedSchema } = await import("../src/tools.js");
+    const { allCommands } = await import("../src/generated/commands.js");
 
-  it("generatedSchema produces valid Zod schemas for all 525 entries", async () => {
-    const { generatedSchema } = await import("../src/tools.js");
     for (const entry of allCommands) {
-      // Every entry must yield an object with a .parse() method
-      const schema = generatedSchema(entry);
-      expect(typeof (schema as unknown as { parse: (v: unknown) => unknown }).parse).toBe("function");
+      const result = __generatedSchema(entry).safeParse({});
+      // __generatedSchema adds mandatory `confirm: z.literal(true)` for destructive/system
+      const hasHiddenRequired = entry.risk === "destructive" || entry.risk === "system";
+      const hasVisibleRequired = entry.args.some((a) => !a.optional);
+      const hasRequired = hasVisibleRequired || hasHiddenRequired;
 
-      // Calling .safeParse({}) must not throw — safeParse never throws
-      // (unlike .parse() which throws ZodError on required args)
-      expect(() => {
-        (schema as unknown as { safeParse: (v: unknown) => unknown }).safeParse({});
-      }).not.toThrow();
+      if (hasRequired) {
+        expect(result.success).toBe(false);
+      } else {
+        expect(result.success).toBe(true);
+      }
     }
   });
 });

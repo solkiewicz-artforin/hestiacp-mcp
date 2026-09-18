@@ -6,6 +6,10 @@
  *
  * Usage:
  *   node scripts/generate-commands.mjs --upstream /path/to/hestia
+ * Options:
+ *   --force             Allow risk downgrades (warning emitted).
+ *   --noApiPseudo       Omit API pseudo-commands.
+ *   --riskOverrides <path>  Custom risk overrides JSON file.
  * Outputs:
  *   src/generated/commands.json — versioned catalog
  *   stdout summary
@@ -13,15 +17,13 @@
 
 import { parseArgs } from "node:util";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
-
-/**
- * HestiaCP CLI argument limit. No `v-*` script accepts more than 13
- * positional arguments. Must match HESTIA_MAX_ARGS in src/tools.ts
- */
-const MAX_ARGS = 13;
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import handcraftedCommandsArr from "../src/generated/handcrafted-commands.json" with { type: "json" };
+import handcraftedCommandsArr from "../src/commands/handcrafted-commands.json" with { type: "json" };
+import constants from "../src/generated/constants.json" with { type: "json" };
+
+/** Must match HESTIA_MAX_ARGS in src/tools.ts (read from constants.json). */
+const MAX_ARGS = constants.MAX_ARGS;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -81,16 +83,41 @@ const HANDCRAFTED_COMMANDS = new Set(handcraftedCommandsArr);
  *
  * HestiaCP script info headers flow directly into MCP tool descriptions
  * consumed by LLMs. Malicious upstream text could be interpreted as agent
- * instructions. Strip control chars, code fences, and double-brace injection.
+ * instructions. Strip control chars, code fences, javascript: URIs, and
+ * double-brace injection patterns. Warnings are emitted when any pattern
+ * actually matches so audit trails remain.
  */
 function sanitizeDescription(raw) {
-  return raw
-    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '') // keep \t, \n, \r   // control chars (keep \t, \n)
-    .replace(/```[^]*?```/gs, '')                          // markdown code blocks
-    .replace(/\[.*?\]\(javascript:/gi, '[link](')                    // javascript: URIs
-    .replace(/\{\{[^{}]*\}\}/g, '')                                // double-brace injection
-    .replace(/\n{3,}/g, '\n\n')                                      // collapse long newline runs
-    .trim();
+  let s = raw;
+
+  // Control characters (keep \t, \n)
+  s = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, (match) => {
+    console.warn(`[sanitize] Removed control character (0x${match.charCodeAt(0).toString(16)}) from description`);
+    return '';
+  });
+
+  // Markdown code blocks
+  s = s.replace(/```[^]*?```/gs, (match) => {
+    console.warn(`[sanitize] Removed code block from description: ${match.substring(0, 80)}...`);
+    return '';
+  });
+
+  // javascript: URIs in links
+  s = s.replace(/\[.*?\]\(javascript:/gi, (match) => {
+    console.warn(`[sanitize] Removed javascript: URI from description`);
+    return '[link](';
+  });
+
+  // Double-brace injection patterns
+  s = s.replace(/\{\{[{}]*\}\}/g, (match) => {
+    console.warn(`[sanitize] Removed double-brace pattern from description`);
+    return '';
+  });
+
+  // Collapse long newline runs (supports CRLF and LF)
+  s = s.replace(/(\r?\n){3,}/g, '\n\n');
+
+  return s.trim();
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -122,40 +149,63 @@ function extractHeader(lines, key) {
   return "";
 }
 
-function classifyRisk(name, overrides) {
-  // 1. Manual overrides always win
-  if (overrides[name]) return overrides[name];
+const RISK_SEVERITY = { read: 0, mutating: 1, destructive: 2, system: 3 };
 
-  // Strip "v-" prefix and get operation prefix
+function classifyRisk(name, overrides, force) {
+  // Compute the automatic risk first (for downgrade validation)
+  const computed = computeAutoRisk(name);
+
+  // 1. Manual overrides always win
+  if (overrides[name] !== undefined) {
+    const override = overrides[name];
+    // Validate risk downgrade: override must not be LESS severe than computed
+    const computedSev = RISK_SEVERITY[computed];
+    const overrideSev = RISK_SEVERITY[override];
+    if (overrideSev !== undefined && computedSev !== undefined && overrideSev < computedSev) {
+      const msg = `Risk downgrade for "${name}": auto-classified as "${computed}" but override forces "${override}"`;
+      if (force) {
+        console.warn(`[downgrade] ${msg} (--force applied)`);
+      } else {
+        throw new Error(`${msg}. Use --force to accept this downgrade.`);
+      }
+    }
+    return override;
+  }
+
+  return computed;
+}
+
+/** Compute the automatic risk classification without override consideration. */
+function computeAutoRisk(name) {
   const withoutV = name.replace(/^v-/, "");
 
-  // 2. READ check first (wins over -sys- patterns)
+  // 1. READ check first (wins over -sys- patterns)
   const opPrefix = withoutV.split("-")[0];
   if (opPrefix && READ_PREFIXES.includes(opPrefix)) {
     return "read";
   }
 
-  // 3. SYSTEM check — contains -sys- (not -hestia-) and NOT read
+  // 2. SYSTEM check — contains -sys- (not -hestia-) and NOT read
   for (const pattern of SYSTEM_PATTERNS) {
     if (withoutV.includes(pattern)) return "system";
   }
 
-  // 4. DESTRUCTIVE check
+  // 3. DESTRUCTIVE check
   if (opPrefix && DESTRUCTIVE_PREFIXES.includes(opPrefix)) {
     return "destructive";
   }
 
-  // 5. MUTATING check
+  // 4. MUTATING check
   if (opPrefix && MUTATING_PREFIXES.includes(opPrefix)) {
     return "mutating";
   }
 
-  // 6. No match — error
-  throw new Error(
-    `Cannot classify risk for command "${name}". ` +
-    `Operation prefix "${opPrefix}" does not match any known risk category. ` +
-    `Add a manual override in src/generated/risk-overrides.json.`
+  // 5. No match — default to mutating with a warning
+  console.warn(
+    `Unknown operation prefix "${opPrefix}" for command "${name}". ` +
+    `Defaulting to "mutating" risk. Add a manual override in src/generated/risk-overrides.json if needed.`
   );
+  return "mutating";
 }
 
 function determineNotes(name, args, risk) {
@@ -197,7 +247,7 @@ function parseScript(filePath) {
     args,
     risk: null, // filled later
     notes: "",  // filled later
-    usage_example: sanitizeDescription(exampleRaw || ""),
+    usage_example: exampleRaw || "",
     stdin: (name === "v-delete-sys-mail-queue" || name === "v-update-sys-hestia-git"),
     fileArg: false // filled later
   };
@@ -210,7 +260,8 @@ const { values } = parseArgs({
     upstream: { type: "string", short: "u" },
     output: { type: "string", short: "o" },
     riskOverrides: { type: "string" },
-    noApiPseudo: { type: "boolean", default: false }
+    noApiPseudo: { type: "boolean", default: false },
+    force: { type: "boolean", default: false }
   }
 });
 
@@ -240,19 +291,22 @@ const envOverrides = process.env.HESTIACP_RISK_OVERRIDES;
 if (envOverrides) {
   try {
     overrides = JSON.parse(envOverrides);
-  } catch (err) {
-    console.error(`Error parsing HESTIACP_RISK_OVERRIDES: ${err.message}`);
+  } catch (e) {
+    console.error("Error: HESTIACP_RISK_OVERRIDES is not valid JSON", e);
     process.exit(1);
   }
-  // Parse overrides but defer risk-downgrade validation until commands are
-  // populated (the validation loop references `commands`).
 } else if (values.riskOverrides) {
-  overrides = JSON.parse(readFileSync(values.riskOverrides, "utf-8"));
+  try {
+    overrides = JSON.parse(readFileSync(values.riskOverrides, "utf-8"));
+  } catch (e) {
+    console.error(`Error: cannot parse --riskOverrides file "${values.riskOverrides}"`, e);
+    process.exit(1);
+  }
 } else {
   try {
     overrides = JSON.parse(readFileSync(OVERRIDES_PATH, "utf-8"));
-  } catch {
-    console.warn("Warning: no risk-overrides.json found — proceeding without overrides");
+  } catch (e) {
+    console.warn("Warning: no risk-overrides.json found — proceeding without overrides", e);
   }
 }
 
@@ -270,7 +324,7 @@ for (const script of scripts) {
       `The HestiaCP REST API truncates all arguments beyond the ${MAX_ARGS}th position.`
     );
   }
-  cmd.risk = classifyRisk(cmd.name, overrides);
+  cmd.risk = classifyRisk(cmd.name, overrides, values.force);
   cmd.notes = determineNotes(cmd.name, cmd.args, cmd.risk);
   cmd.fileArg = cmd.notes.includes("Requires a file path on the SERVER side");
   commands.push(cmd);
@@ -279,23 +333,8 @@ for (const script of scripts) {
 // Add API pseudo-commands
 if (!values.noApiPseudo) {
   for (const pseudo of API_PSEUDO_COMMANDS) {
-    pseudo.risk = classifyRisk(pseudo.name, overrides);
+    pseudo.risk = classifyRisk(pseudo.name, overrides, values.force);
     commands.push(pseudo);
-  }
-}
-
-// Validate no risk-level downgrades (destructive→mutating, system→read) unless --force
-if (Object.keys(overrides).length > 0 && !values.force) {
-  const riskSeverity = { destructive: 3, system: 3, mutating: 2, read: 1 };
-  for (const [cmd, level] of Object.entries(overrides)) {
-    const cmdObj = commands.find((c) => c.command === cmd);
-    if (cmdObj && riskSeverity[level] < riskSeverity[cmdObj.risk]) {
-      console.error(
-        `Risk override for "${cmd}" downgrades risk from "${cmdObj.risk}" to "${level}". ` +
-        `Use --force to allow this.`
-      );
-      process.exit(1);
-    }
   }
 }
 
