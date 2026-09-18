@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CommandEntry } from "../src/generated/commands.js";
 import {
   HESTIA_MAX_ARGS,
-  validateTmpFileArgs,
+  validateTmpFilePath,
   capArgs,
   gateCheck,
   entryRiskClass,
@@ -19,39 +19,44 @@ describe("entryRiskClass", () => {
   });
 });
 
-// ── validateTmpFileArgs ──────────────────────────────────────────────────
+// ── validateTmpFilePath ──────────────────────────────────────────────────
 
-describe("validateTmpFileArgs", () => {
+describe("validateTmpFilePath", () => {
   it("accepts alphanumeric filenames", () => {
-    expect(validateTmpFileArgs("data.txt")).toBe("/tmp/data.txt");
+    expect(validateTmpFilePath("data.txt")).toBe("/tmp/data.txt");
   });
 
   it("accepts dotfiles", () => {
-    expect(validateTmpFileArgs(".htaccess")).toBe("/tmp/.htaccess");
-    expect(validateTmpFileArgs(".env")).toBe("/tmp/.env");
+    expect(validateTmpFilePath(".htaccess")).toBe("/tmp/.htaccess");
+    expect(validateTmpFilePath(".env")).toBe("/tmp/.env");
+  });
+
+  it("rejects solitary dot and double-dot", () => {
+    expect(() => validateTmpFilePath(".")).toThrow(/filename cannot be '.' or '..'/);
+    expect(() => validateTmpFilePath("..")).toThrow(/filename cannot be '.' or '..'/);
   });
 
   it("accepts filenames with underscores and hyphens", () => {
-    expect(validateTmpFileArgs("my_config-2.txt")).toBe("/tmp/my_config-2.txt");
+    expect(validateTmpFilePath("my_config-2.txt")).toBe("/tmp/my_config-2.txt");
   });
 
   it("rejects path traversal filenames", () => {
-    expect(() => validateTmpFileArgs("../../etc/passwd")).toThrow(/Invalid filename/);
+    expect(() => validateTmpFilePath("../../etc/passwd")).toThrow(/Invalid filename/);
   });
 
   it("throws on path traversal attempt targeting root", () => {
-    expect(() => validateTmpFileArgs("/etc/hosts")).toThrow(
+    expect(() => validateTmpFilePath("/etc/hosts")).toThrow(
       /Invalid filename/
     );
   });
 
   it("throws on names with forbidden chars (spaces, <, >)", () => {
-    expect(() => validateTmpFileArgs("bad name.txt")).toThrow(/Invalid filename/);
-    expect(() => validateTmpFileArgs("x<y.txt")).toThrow(/Invalid filename/);
+    expect(() => validateTmpFilePath("bad name.txt")).toThrow(/Invalid filename/);
+    expect(() => validateTmpFilePath("x<y.txt")).toThrow(/Invalid filename/);
   });
 
   it("throws on empty filename", () => {
-    expect(() => validateTmpFileArgs("")).toThrow(/Invalid filename/);
+    expect(() => validateTmpFilePath("")).toThrow(/Invalid filename/);
   });
 });
 

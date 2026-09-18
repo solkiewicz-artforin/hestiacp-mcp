@@ -6,7 +6,8 @@ import { basename } from "node:path";
 import { redact, safeError } from "./redact.js";
 import { allCommands, type CommandEntry } from "./generated/commands.js";
 import handcraftedCommandsArr from "./commands/handcrafted-commands.json" with { type: "json" };
-import constants from "./generated/constants.json" with { type: "json" };
+
+export const HESTIA_MAX_ARGS = 13;
 
 type Safety = "read" | "mutating" | "destructive";
 type CommandSpec = {
@@ -92,7 +93,6 @@ export const HANDCRAFTED_COMMANDS: ReadonlySet<string> = new Set(handcraftedComm
  * arguments. This constant is shared between the generator (Zod schema size)
  * and the runtime (argument validation in `generatedArgs`).
  */
-export const HESTIA_MAX_ARGS: number = constants.MAX_ARGS;
 
 function read(
   name: string,
@@ -306,7 +306,7 @@ export const commandSpecs: readonly CommandSpec[] = [
 
 // ── Generated tool helpers ────────────────────────────────────────────────
 
-export function __generatedSchema(entry: CommandEntry): z.ZodObject<Record<string, z.ZodType>> {
+export function _generatedSchema(entry: CommandEntry): z.ZodObject<Record<string, z.ZodType>> {
   const shape: Record<string, z.ZodType> = {};
   for (const arg of entry.args) {
     if (arg.kind === "confirm") {
@@ -318,7 +318,7 @@ export function __generatedSchema(entry: CommandEntry): z.ZodObject<Record<strin
     }
   }
   // Add confirm field for destructive and system risk classes
-  if (entry.risk === "destructive" || entry.risk === "system") {
+  if (isDestructiveOrSystem(entry.risk)) {
     if (!("confirm" in shape)) {
       shape.confirm = z.literal(true).describe("Type true to confirm this potentially dangerous operation");
     }
@@ -331,6 +331,11 @@ export function __generatedSchema(entry: CommandEntry): z.ZodObject<Record<strin
  */
 export function entryRiskClass(entry: CommandEntry): "read" | "mutating" | "destructive" | "system" {
   return entry.risk;
+}
+
+/** Returns true when the risk level requires a confirmation gate. */
+export function isDestructiveOrSystem(risk: string): boolean {
+  return risk === "destructive" || risk === "system";
 }
 
 /**
@@ -355,7 +360,7 @@ export function generatedDescription(entry: CommandEntry): string {
 function toolAnnotation(risk: string) {
   return {
     readOnlyHint: risk === "read",
-    destructiveHint: risk === "destructive" || risk === "system",
+    destructiveHint: isDestructiveOrSystem(risk),
     idempotentHint: risk === "read",
     openWorldHint: true
   };
@@ -408,13 +413,16 @@ export function gateCheck(
  * hyphens. A leading dot is allowed (e.g. ".htaccess", ".env").
  * Returns the full path with `/tmp/` prepended to prevent path traversal.
  */
-export function validateTmpFileArgs(filename: string): string {
-  const DOT_FILE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$|^\.[a-zA-Z0-9._-]+$/;
-  if (!DOT_FILE_RE.test(filename)) {
+export function validateTmpFilePath(filename: string): string {
+  if (filename === "." || filename === "..") {
+    throw new Error("filename cannot be '.' or '..'");
+  }
+  const VALID_TMP_FILENAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$|^\.[a-zA-Z0-9._-]+$/;
+  if (!VALID_TMP_FILENAME.test(filename)) {
     const safe = JSON.stringify(filename.length > 100 ? filename.slice(0, 100) + "…" : filename);
     throw new Error(
       `Invalid filename ${safe} for v-make-tmp-file. ` +
-      `Filename must match ${String(DOT_FILE_RE)}.`
+      `Filename may contain only alphanumeric characters, dots, dashes, or underscores.`
     );
   }
   return "/tmp/" + filename;
@@ -447,7 +455,7 @@ export function generatedArgs(entry: CommandEntry, input: Record<string, unknown
   if (entry.command === "v-make-tmp-file") {
     const content = typeof input.CONTENT === "string" ? input.CONTENT : "";
     const raw = typeof input.FILENAME === "string" ? basename(input.FILENAME) : "";
-    return capArgs([content, validateTmpFileArgs(raw)]);
+    return capArgs([content, validateTmpFilePath(raw)]);
   }
   const result: string[] = new Array<string>(entry.args.length).fill("");
   for (let i = 0; i < entry.args.length; i++) {
@@ -473,10 +481,10 @@ type ToolGroup = {
  * Build tool groups dynamically from generated commands.
  * Each group is a 3-segment prefix (v-<action>-<target>).
  */
-export function buildToolGroups(cmds: readonly Readonly<CommandEntry>[]): Record<string, ToolGroup> {
+export function buildToolGroups(): Record<string, ToolGroup> {
   const groups: Record<string, ToolGroup> = {};
   const seen = new Set<string>();
-  for (const c of cmds) {
+  for (const c of allCommands) {
     if (HANDCRAFTED_COMMANDS.has(c.command)) continue;
     const parts = c.command.split("-");
     if (parts.length >= 3) {
@@ -550,7 +558,7 @@ export function createServer(
 
 
   const generatedToolMap = new Map<string, RegisteredTool>();
-  const TOOL_GROUPS = buildToolGroups(allCommands);
+  const TOOL_GROUPS = buildToolGroups();
 
   // ── Generated tool registration ──────────────────────────────────────────
   const enabledGenerated = new Set<string>();
@@ -559,7 +567,7 @@ export function createServer(
   for (const entry of allCommands) {
     if (HANDCRAFTED_COMMANDS.has(entry.command)) continue;
 
-    const schema: z.ZodObject<Record<string, z.ZodType>> = __generatedSchema(entry);
+    const schema: z.ZodObject<Record<string, z.ZodType>> = _generatedSchema(entry);
     const risk = entryRiskClass(entry);
     // Register all, but immediately disable if profile === "curated"
     const tool = server.registerTool(
@@ -700,33 +708,6 @@ export function createServer(
       };
     }
   );
-
-  // ── Startup schema validation ──────────────────────────────────────────
-  // Validate every generated schema at startup so broken schemas are caught
-  // immediately rather than at invocation time.
-  for (const entry of allCommands) {
-    if (HANDCRAFTED_COMMANDS.has(entry.command)) continue;
-    try {
-      // __generatedSchema adds mandatory `confirm: z.literal(true)` for destructive/system,
-      // so provide it to test schemas with no visible required args.
-      const needsImplicitConfirm = entry.risk === "destructive" || entry.risk === "system";
-      const testInput = needsImplicitConfirm ? { confirm: true } : {};
-      const result = __generatedSchema(entry).safeParse(testInput);
-      if (!result.success) {
-        // Expected for commands with required args; only warn on unexpected errors
-        const hasRequired = entry.args.some(a => !a.optional);
-        if (!hasRequired) {
-          console.warn(
-            `[startup] Schema validation failed for "${entry.command}" (all args optional):`,
-            result.error.issues.map(i => i.message).join("; ")
-          );
-        }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[startup] Skipping broken tool "${entry.command}":`, msg);
-    }
-  }
 
   return server;
 }
