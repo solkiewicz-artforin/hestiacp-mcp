@@ -217,14 +217,12 @@ function computeAutoRisk(name) {
     return "mutating";
   }
 
-  // 5. No match — warn and fall back to "mutating"
-  process.stderr.write(
-    `[WARN] Unknown operation prefix "${opPrefix}" for command "${name}". ` +
-    `Cannot determine risk classification. Defaulting to "mutating". Add the prefix to a known ` +
-    `list (READ_PREFIXES, MUTATING_PREFIXES, DESTRUCTIVE_PREFIXES) in scripts/generate-commands.mjs, ` +
-    `or add a manual override in src/generated/risk-overrides.json.\n`
+  // 5. No match — fatal error (SEC-04: unknown prefixes are not tolerated)
+  throw new Error(
+    `Unknown operation prefix "${opPrefix}" for command "${name}". ` +
+    `Add "${opPrefix}" to the appropriate prefix list (READ_PREFIXES, MUTATING_PREFIXES, DESTRUCTIVE_PREFIXES) ` +
+    `in scripts/generate-commands.mjs, or add a manual override in src/generated/risk-overrides.json.`
   );
-  return "mutating";
 }
 
 function determineNotes(name, args, risk) {
