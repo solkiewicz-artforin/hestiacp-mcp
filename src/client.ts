@@ -90,6 +90,8 @@ async function readBoundedText(
     if (error instanceof HestiaApiError) {
       throw error;
     }
+    process.stderr.write(`[HestiaClient] Stream read error for command "${command}": ` +
+      `${error instanceof Error ? error.message : String(error)}\n`);
     throw new HestiaApiError(
       isTimeoutError(error)
         ? "HestiaCP response timed out; the remote command outcome is unknown, so verify state before retrying"
@@ -158,6 +160,8 @@ export class HestiaClient {
         dispatcher: this.#dispatcher
       } as RequestInit);
     } catch (error) {
+      process.stderr.write(`[HestiaClient] Request failed for command "${command}": ` +
+        `${error instanceof Error ? error.message : String(error)}\n`);
       const message =
         isTimeoutError(error)
           ? `HestiaCP request timed out after ${String(timeoutMs)}ms; the remote command outcome is unknown, so verify state before retrying`

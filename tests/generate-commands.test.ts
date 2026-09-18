@@ -210,6 +210,26 @@ echo "${name} ran"
   });
 
   // ── Risk classification ──────────────────────────────────────────────────
+  // test-01-downgrade ── ─────────────────────────────────────────────────────
+  it("rejects risk downgrade via override without --force", () => {
+    const dir = scratchUpstream([
+      { name: "v-remove-acc", info: "Remove account", options: "USER" },
+    ]);
+    // Override destructive → read (downgrade) — should fail without --force
+    expect(() => runGenerator(dir, { "v-remove-acc": "read" })).toThrow(/downgrade|force/i);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("allows risk downgrade with --force flag", () => {
+    const dir = scratchUpstream([
+      { name: "v-remove-force-ok", info: "Remove", options: "USER" },
+    ]);
+    // Override destructive → read (downgrade) — should succeed with --force
+    const catalog = runGenerator(dir, { "v-remove-force-ok": "read" }, ["--noApiPseudo", "--force"]);
+    const cmd = findCmd(catalog, "v-remove-force-ok");
+    expect(cmd.risk).toBe("read");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 
   it("classifies a read prefix as 'read' even with -sys-", () => {
     const dir = scratchUpstream([
@@ -251,14 +271,54 @@ echo "${name} ran"
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("errors on completely unknown operation prefix (no fallback)", () => {
+  it("throws on unknown operation prefix instead of falling back", () => {
     const dir = scratchUpstream([
       { name: "v-foobar-something", info: "Unknown operation", options: "THING" },
     ]);
-    expect(() => runGenerator(dir)).toThrow(
-      /un(matched|known|classifiable)|no risk|cannot classify/i
-    );
+    expect(() => runGenerator(dir)).toThrow(/Unknown operation prefix/);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ── JSON parse error logging (LOW #9) ──────────────────────────────────
+
+  it("fails gracefully when HESTIACP_RISK_OVERRIDES is invalid JSON", () => {
+    const dir = scratchUpstream([
+      { name: "v-list-users", info: "List users", options: "" },
+    ]);
+    const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), "gen-test-"));
+    const outFile = path.join(tmpdir, "commands.json");
+    const cmd = [
+      "node",
+      path.resolve(__dirname, "..", "scripts", "generate-commands.mjs"),
+      "--upstream", dir,
+      "--output", outFile,
+      "--noApiPseudo",
+    ];
+    const env = { ...process.env, HESTIACP_RISK_OVERRIDES: "not valid json {{{" };
+    expect(() => execSync(cmd.join(" "), { encoding: "utf-8", stdio: "pipe", env })).toThrow();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  });
+
+  it("fails when --riskOverrides file contains malformed JSON", () => {
+    const dir = scratchUpstream([
+      { name: "v-list-users", info: "List users", options: "" },
+    ]);
+    const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), "gen-test-"));
+    const outFile = path.join(tmpdir, "commands.json");
+    const badJson = path.join(tmpdir, "bad.json");
+    fs.writeFileSync(badJson, "{invalid json content}", "utf-8");
+    const cmd = [
+      "node",
+      path.resolve(__dirname, "..", "scripts", "generate-commands.mjs"),
+      "--upstream", dir,
+      "--output", outFile,
+      "--riskOverrides", badJson,
+      "--noApiPseudo",
+    ];
+    expect(() => execSync(cmd.join(" "), { encoding: "utf-8", stdio: "pipe" })).toThrow();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(tmpdir, { recursive: true, force: true });
   });
 
   // ── Edge cases ────────────────────────────────────────────────────────────

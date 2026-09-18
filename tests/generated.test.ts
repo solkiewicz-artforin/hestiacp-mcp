@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
@@ -33,6 +34,23 @@ describe("generated command catalog", () => {
   });
 
   // ── Handcrafted / generated consistency (review findings #8, #22, #26) ──
+
+  it("HANDCRAFTED_COMMANDS exactly matches handcrafted-commands.json file", async () => {
+    const { HANDCRAFTED_COMMANDS } = await import("../src/tools.js");
+    const handcraftedJson = await import("../src/commands/handcrafted-commands.json", {
+      with: { type: "json" },
+    });
+    const jsonCommands = new Set(handcraftedJson.default);
+    const handcraftedSet = new Set(HANDCRAFTED_COMMANDS);
+
+    // Every JSON entry must be in HANDCRAFTED_COMMANDS
+    const missingFromSet = [...jsonCommands].filter((h) => !handcraftedSet.has(h));
+    expect(missingFromSet).toEqual([]);
+
+    // Every HANDCRAFTED_COMMANDS entry must be in the JSON file
+    const missingFromJson = [...handcraftedSet].filter((h) => !jsonCommands.has(h));
+    expect(missingFromJson).toEqual([]);
+  });
 
   it("handcrafted commands exactly match typed CommandSpec commands", async () => {
     const { HANDCRAFTED_COMMANDS, commandSpecs } = await import("../src/tools.js");
@@ -170,27 +188,74 @@ describe("generated command catalog", () => {
     expect(fileCmds.length).toBe(8);
   });
 
-  // No command exceeds 13 arguments
-  for (const entry of allCommands) {
-    it(`${entry.command}: args ≤ 13`, () => {
-      expect(entry.args.length).toBeLessThanOrEqual(13);
-    });
-  }
-
-  // ── Schema smoke test (review finding #9) ──
-
-  it("generatedSchema produces valid Zod schemas for all 525 entries", async () => {
-    const { generatedSchema } = await import("../src/tools.js");
+  // No command exceeds the HestiaCP API argument cap
+  it("every command stays within HESTIA_MAX_ARGS", async () => {
+    const { HESTIA_MAX_ARGS } = await import("../src/tools.js");
     for (const entry of allCommands) {
-      // Every entry must yield an object with a .parse() method
-      const schema = generatedSchema(entry);
-      expect(typeof (schema as unknown as { parse: (v: unknown) => unknown }).parse).toBe("function");
+      expect(entry.args.length, `${entry.command}: args ≤ ${String(HESTIA_MAX_ARGS)}`).toBeLessThanOrEqual(HESTIA_MAX_ARGS);
+    }
+  });
 
-      // Calling .safeParse({}) must not throw — safeParse never throws
-      // (unlike .parse() which throws ZodError on required args)
-      expect(() => {
-        (schema as unknown as { safeParse: (v: unknown) => unknown }).safeParse({});
-      }).not.toThrow();
+  // ── Deeper schema assertions (LOW #13) ─────────────────────────────
+
+  it("_generatedSchema adds confirm field for destructive and system entries", async () => {
+    const { _generatedSchema } = await import("../src/tools.js");
+    for (const entry of allCommands) {
+      const schema = _generatedSchema(entry);
+      const shape = schema.shape;
+      if (entry.risk === "destructive" || entry.risk === "system") {
+        expect(shape).toHaveProperty("confirm");
+      } else {
+        // Non-destructive entries without explicit confirm args must not have confirm
+        if (!entry.args.some(a => a.name === "confirm")) {
+          expect(shape).not.toHaveProperty("confirm");
+        }
+      }
+    }
+  });
+
+  it("_generatedSchema maps every declared arg into a Zod shape key", async () => {
+    const { _generatedSchema } = await import("../src/tools.js");
+    for (const entry of allCommands) {
+      const schema = _generatedSchema(entry);
+      const shape = schema.shape;
+      for (const arg of entry.args) {
+        expect(shape, `${entry.command}: missing key ${arg.name}`).toHaveProperty(arg.name);
+      }
+    }
+  });
+
+  it("_generatedSchema required args produce non-optional Zod types", async () => {
+    const { _generatedSchema } = await import("../src/tools.js");
+    for (const entry of allCommands) {
+      const schema = _generatedSchema(entry);
+      const shape = schema.shape;
+      for (const arg of entry.args) {
+        if (!arg.optional) {
+          const isOptional = shape[arg.name] instanceof z.ZodOptional;
+          expect(isOptional, `${entry.command}: ${arg.name} should be required`).toBe(false);
+        }
+      }
+    }
+  });
+
+  // Schema smoke: safeParse({}) fails for required args, succeeds for optional-only
+  it("safeParse({}) schema smoke test", async () => {
+    const { _generatedSchema } = await import("../src/tools.js");
+    const { allCommands } = await import("../src/generated/commands.js");
+
+    for (const entry of allCommands) {
+      const result = _generatedSchema(entry).safeParse({});
+      // _generatedSchema adds mandatory `confirm: z.literal(true)` for destructive/system
+      const hasHiddenRequired = entry.risk === "destructive" || entry.risk === "system";
+      const hasVisibleRequired = entry.args.some((a) => !a.optional);
+      const hasRequired = hasVisibleRequired || hasHiddenRequired;
+
+      if (hasRequired) {
+        expect(result.success).toBe(false);
+      } else {
+        expect(result.success).toBe(true);
+      }
     }
   });
 });

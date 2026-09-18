@@ -22,6 +22,7 @@ const envSchema = z.object({
   HESTIACP_ALLOW_MUTATIONS: booleanString("false"),
   HESTIACP_ALLOW_DESTRUCTIVE: booleanString("false"),
   HESTIACP_ALLOW_SYSTEM: booleanString("false"),
+  HESTIACP_ALLOW_MANAGEMENT: booleanString("false"),
   HESTIACP_TOOL_PROFILE: toolProfileSchema,
   HESTIACP_MAX_RESPONSE_BYTES: z.coerce
     .number()
@@ -41,6 +42,7 @@ export type Config = {
   allowMutations: boolean;
   allowDestructive: boolean;
   allowSystem: boolean;
+  allowManagement: boolean;
   toolProfile: "all" | "curated";
   maxResponseBytes: number;
 };
@@ -77,6 +79,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowMutations: result.data.HESTIACP_ALLOW_MUTATIONS,
     allowDestructive: result.data.HESTIACP_ALLOW_DESTRUCTIVE,
     allowSystem: result.data.HESTIACP_ALLOW_SYSTEM,
+    allowManagement: result.data.HESTIACP_ALLOW_MANAGEMENT || result.data.HESTIACP_ALLOW_MUTATIONS,
     toolProfile: result.data.HESTIACP_TOOL_PROFILE,
     maxResponseBytes: result.data.HESTIACP_MAX_RESPONSE_BYTES
   };

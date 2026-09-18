@@ -1,11 +1,22 @@
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/server";
-// Verified: RegisteredTool is exported as a type from @modelcontextprotocol/server (v^2.0.0).
-// If the export changes in a future version, switch to ReturnType<McpServer["registerTool"]>.
 import { z } from "zod";
 import { HestiaApiError, type HestiaClient } from "./client.js";
 import type { Config } from "./config.js";
+import { basename } from "node:path";
 import { redact, safeError } from "./redact.js";
 import { allCommands, type CommandEntry } from "./generated/commands.js";
+import handcraftedCommandsArr from "./commands/handcrafted-commands.json" with { type: "json" };
+
+export const HESTIA_MAX_ARGS = 13;
+
+/**
+ * Maximum size in bytes of content accepted by v-make-tmp-file.
+ * Larger payloads are rejected to prevent resource exhaustion.
+ */
+export const HESTIACP_MAX_TMP_FILE_SIZE = 64 * 1024; // 64 KB
+
+/** Maximum visible length of a filename in a validation error. */
+const MAX_FILENAME_DISPLAY_LENGTH = 100;
 
 type Safety = "read" | "mutating" | "destructive";
 type CommandSpec = {
@@ -83,14 +94,14 @@ export function sanitizeSystemConfig(data: unknown): { config: Record<string, un
   };
 }
 
-/** HestiaCP CLI argument limit. No `v-*` script accepts more than 13 positional
+/** Commands already hand-crafted as typed tool specs — skipped by the generated loop. */
+export const HANDCRAFTED_COMMANDS: ReadonlySet<string> = new Set(handcraftedCommandsArr);
+
+/**
+ * HestiaCP CLI argument limit. No `v-*` script accepts more than 13 positional
  * arguments. This constant is shared between the generator (Zod schema size)
  * and the runtime (argument validation in `generatedArgs`).
  */
-export const HESTIA_MAX_ARGS = 13;
-
-/** Maximum allowed size for v-make-tmp-file content (64 KB). */
-export const HESTIACP_MAX_TMP_FILE_SIZE = 64 * 1024;
 
 function read(
   name: string,
@@ -302,15 +313,17 @@ export const commandSpecs: readonly CommandSpec[] = [
   }))
 ];
 
-/** Commands already hand-crafted as typed tool specs — skipped by the generated loop.
- *  Derived at runtime from `commandSpecs` keys, not a separate JSON file. */
-export const HANDCRAFTED_COMMANDS: ReadonlySet<string> = new Set(
-  commandSpecs.map((s) => s.command)
-);
-
 // ── Generated tool helpers ────────────────────────────────────────────────
 
-export function generatedSchema(entry: CommandEntry): z.ZodObject<Record<string, z.ZodType>> {
+/**
+ * Generate a Zod schema for a generated (non-handcrafted) command entry.
+ *
+ * @param entry - The command catalog entry.
+ * @returns A Zod object schema with appropriate types and descriptions for each argument.
+ *
+ * @internal — generated-tool layer; consumers use predefined CommandSpecs.
+ */
+export function _generatedSchema(entry: CommandEntry): z.ZodObject<Record<string, z.ZodType>> {
   const shape: Record<string, z.ZodType> = {};
   for (const arg of entry.args) {
     if (arg.kind === "confirm") {
@@ -322,7 +335,7 @@ export function generatedSchema(entry: CommandEntry): z.ZodObject<Record<string,
     }
   }
   // Add confirm field for destructive and system risk classes
-  if (entry.risk === "destructive" || entry.risk === "system") {
+  if (isDestructiveOrSystem(entry.risk)) {
     if (!("confirm" in shape)) {
       shape.confirm = z.literal(true).describe("Type true to confirm this potentially dangerous operation");
     }
@@ -330,15 +343,29 @@ export function generatedSchema(entry: CommandEntry): z.ZodObject<Record<string,
   return z.object(shape);
 }
 
-function entryRiskClass(entry: CommandEntry): "read" | "mutating" | "destructive" | "system" {
+/**
+ * Classify a command entry's risk level.
+ */
+export function entryRiskClass(entry: CommandEntry): "read" | "mutating" | "destructive" | "system" {
   return entry.risk;
 }
 
-function toolTitle(cmd: string): string {
+/** Returns true when the risk level requires a confirmation gate. */
+export function isDestructiveOrSystem(risk: string): boolean {
+  return risk === "destructive" || risk === "system";
+}
+
+/**
+ * Derive a human-readable tool title from a v-* command name.
+ */
+export function toolTitle(cmd: string): string {
   return cmd.replace(/^v-/, "").replaceAll("-", " ");
 }
 
-function generatedDescription(entry: CommandEntry): string {
+/**
+ * Build a description string for a generated command entry.
+ */
+export function generatedDescription(entry: CommandEntry): string {
   let desc = entry.description;
   if (entry.notes) {
     desc += ` (${entry.notes})`;
@@ -350,17 +377,34 @@ function generatedDescription(entry: CommandEntry): string {
 function toolAnnotation(risk: string) {
   return {
     readOnlyHint: risk === "read",
-    destructiveHint: risk === "destructive" || risk === "system",
+    destructiveHint: isDestructiveOrSystem(risk),
     idempotentHint: risk === "read",
     openWorldHint: true
   };
 }
 
-function gateCheck(
+/**
+ * Check whether a given risk level is allowed under the current config.
+ * Returns `null` if the operation is allowed, otherwise an error message.
+ *
+ * @param risk - The operation's risk classification (read, mutating, destructive, system, management).
+ *   "management" controls administrative operations like set_tool_group; it defaults to
+ *   the same gating as "mutating" unless allowManagement is explicitly configured.
+ * @param cfg - Current gate configuration.
+ */
+export function gateCheck(
   risk: string,
-  cfg: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem">
+  cfg: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem" | "allowManagement">
 ): string | null {
   if (risk === "read") return null;
+  if (risk === "management") {
+    // Dedicated gate for administrative tool-group operations.
+    // Falls back to allowMutations if allowManagement is not set (backward compat).
+    if (!cfg.allowManagement) {
+      return "Management operations are disabled. Set HESTIACP_ALLOW_MANAGEMENT=true to enable them.";
+    }
+    return null;
+  }
   if (!cfg.allowMutations) {
     return "Mutating tools are disabled. Set HESTIACP_ALLOW_MUTATIONS=true to enable them.";
   }
@@ -375,6 +419,28 @@ function gateCheck(
 }
 
 /**
+ * Heuristic binary-content detector.
+ * Returns true if the first 512 bytes contain a non-trivial number of
+ * non-printable, non-whitespace characters — a strong signal of binary data.
+ *
+ * @internal
+ */
+export function isLikelyBinary(content: string, sampleSize = 512): boolean {
+  const sample = content.slice(0, sampleSize);
+  let nonPrintable = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const code = sample.charCodeAt(i);
+    // Allow: TAB(9), LF(10), CR(13), space(32)-~(126), and common UTF-8 multi-byte lead bytes (0xC0+)
+    if (code === 9 || code === 10 || code === 13) continue;
+    if (code >= 32 && code <= 126) continue;
+    if (code >= 0xC0) continue;
+    nonPrintable++;
+    if (nonPrintable > 3) return true;
+  }
+  return false;
+}
+
+/**
  * Build the positional argument array for a generated command invocation.
  *
  * HestiaCP uses positional CLI binding: every index maps to a specific argument,
@@ -386,40 +452,78 @@ function gateCheck(
  * value, which may have unintended side-effects for certain commands. This is a
  * fundamental constraint of positional argument encoding — the only workaround
  * would be per-command arg-remapping (as done for v-make-tmp-file). No upstream
- * 0pen-source `v-*` script exhibits this pathological ordering for mandatory args.
+ * open-source `v-*` script exhibits this pathological ordering for mandatory args.
  *
  * Trailing empty strings are trimmed before invocation (the HestiaCP API does not
  * require them).
  */
-function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): string[] {
-  // If the entry provides an explicit argMap, use it to remap parameter names
-  // to positional indices (e.g. v-make-tmp-file: {CONTENT→0, FILENAME→1}).
-  // Otherwise, the catalog arg order matches the HestiaCP positional binding.
-  if (entry.argMap) {
-    const result: string[] = new Array<string>(entry.args.length).fill("");
-    for (const [paramName, pos] of Object.entries(entry.argMap)) {
-      const val: unknown = input[paramName];
-      if (val !== undefined && val !== null) {
-        const sanitized = typeof val === "string" ? val : JSON.stringify(val);
-        result[pos] = sanitized;
-      }
-    }
-    // Validate all required (non-optional) args were provided
-    for (const arg of entry.args) {
-      if (!arg.optional && !result[entry.argMap[arg.name] ?? -1]) {
-        throw new Error(`Missing required argument: ${arg.name}`);
-      }
-    }
-    // Trim trailing empty strings (API doesn't need them)
-    while (result.length > 0 && result[result.length - 1] === "") {
-      result.pop();
-    }
-    if (result.length > HESTIA_MAX_ARGS) {
-      throw new Error(`Too many arguments (${String(result.length)}). HestiaCP API limit is ${String(HESTIA_MAX_ARGS)}.`);
-    }
-    return result;
-  }
 
+/**
+ * Validate filename for v-make-tmp-file inputs.
+ *
+ * Filenames must consist of alphanumeric characters, dots, underscores, and
+ * hyphens. A leading dot is allowed (e.g. ".htaccess", ".env").
+ * Returns the full path with `/tmp/` prepended to prevent path traversal.
+ */
+export function validateTmpFilePath(filename: string): string {
+  if (filename === "." || filename === "..") {
+    throw new Error("filename cannot be '.' or '..'");
+  }
+  if (filename.startsWith("..")) {
+    throw new Error("Invalid filename — must not start with '..'");
+  }
+  const VALID_TMP_FILENAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$|^\.[a-zA-Z0-9._-]+$/;
+  if (!VALID_TMP_FILENAME.test(filename)) {
+    const safe = JSON.stringify(filename.length > MAX_FILENAME_DISPLAY_LENGTH ? filename.slice(0, MAX_FILENAME_DISPLAY_LENGTH) + "…" : filename);
+    throw new Error(
+      `Invalid filename ${safe} for v-make-tmp-file. ` +
+      `Filename may contain only alphanumeric characters, dots, dashes, or underscores.`
+    );
+  }
+  return "/tmp/" + filename;
+}
+
+/**
+ * Trim trailing empty placeholders (without mutating the original array)
+ * and enforce the HestiaCP positional-arg cap.
+ */
+export function capArgs(result: string[]): string[] {
+  const trimmed = result.slice();
+  while (trimmed.length > 0 && trimmed[trimmed.length - 1] === "") {
+    trimmed.pop();
+  }
+  if (trimmed.length > HESTIA_MAX_ARGS) {
+    throw new Error(
+      `Too many arguments (${String(trimmed.length)}). HestiaCP API limit is ${String(HESTIA_MAX_ARGS)}.`
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Build the CLI positional-argument array for a generated command.
+ */
+export function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): string[] {
+  // v-make-tmp-file requires two ordered arguments:
+  // arg1: file content (string, may contain multi-line or binary-safe data)
+  // arg2: optional filename (defaults to 'mcp-tmp' if empty)
+  if (entry.command === "v-make-tmp-file") {
+    const content = typeof input.CONTENT === "string" ? input.CONTENT : "";
+    // Content validation (C2): reject oversized, null-byte, and binary payloads
+    if (content.length > HESTIACP_MAX_TMP_FILE_SIZE) {
+      throw new Error(
+        `Content too large (${String(content.length)} bytes). Maximum allowed size is ${String(HESTIACP_MAX_TMP_FILE_SIZE)} bytes.`
+      );
+    }
+    if (content.includes("\x00")) {
+      throw new Error("Content contains null bytes, which are not allowed in v-make-tmp-file.");
+    }
+    if (isLikelyBinary(content)) {
+      throw new Error("Content appears to be binary data. Only text content is accepted.");
+    }
+    const raw = typeof input.FILENAME === "string" ? basename(input.FILENAME) : "";
+    return capArgs([content, validateTmpFilePath(raw)]);
+  }
   const result: string[] = new Array<string>(entry.args.length).fill("");
   for (let i = 0; i < entry.args.length; i++) {
     const arg = entry.args[i];
@@ -432,68 +536,25 @@ function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): str
     }
     // optional args missing stay as "" (placeholder — see JSDoc above)
   }
-  // Trim trailing empty strings (API doesn't need them)
-  while (result.length > 0 && result[result.length - 1] === "") {
-    result.pop();
-  }
-  // Validate arg count
-  if (result.length > HESTIA_MAX_ARGS) {
-    throw new Error(`Too many arguments (${String(result.length)}). HestiaCP API limit is ${String(HESTIA_MAX_ARGS)}.`);
-  }
-  return result;
+  return capArgs(result);
 }
 
-/**
- * Validate arguments for v-make-tmp-file before they are sent to the API.
- * Rejects content that is too large, binary, or contains null bytes, and
- * rejects filenames that contain path separators, traversal markers, or
- * characters outside the safe set `[a-zA-Z0-9._-]+`.
- */
-function validateTmpFileArgs(entry: CommandEntry, input: Record<string, unknown>): void {
-  if (entry.command !== "v-make-tmp-file") return;
-
-  // 1. Size limit
-  const content: string = typeof input.CONTENT === "string" ? input.CONTENT : "";
-  const contentBytes = Buffer.byteLength(content, "utf-8");
-  if (contentBytes > HESTIACP_MAX_TMP_FILE_SIZE) {
-    throw new Error(
-      `File content (${String(contentBytes)} bytes) exceeds the maximum of ${String(HESTIACP_MAX_TMP_FILE_SIZE)} bytes.`
-    );
-  }
-
-  // 2. Binary / null-byte rejection
-  if (content.includes("\x00")) {
-    throw new Error("File content must not contain null bytes.");
-  }
-
-  // 3. Filename validation
-  const filename: string = typeof input.FILENAME === "string" ? input.FILENAME : "";
-  if (!filename || filename.length === 0) {
-    throw new Error("Filename must not be empty.");
-  }
-  if (filename.includes("/") || filename.includes("..")) {
-    throw new Error("Filename must not contain path separators or traversal markers (/, ..).");
-  }
-  if (!/^[a-zA-Z0-9._-]+$/.test(filename)) {
-    throw new Error(
-      `Filename "${filename}" contains invalid characters. Only [a-zA-Z0-9._-] are allowed.`
-    );
-  }
-}
-
-const generatedToolMap = new Map<string, RegisteredTool>();
-
-// Build TOOL_GROUPS dynamically from generated commands
 type ToolGroup = {
   prefix: string;
   description: string;
-}
-function buildToolGroups(): Record<string, ToolGroup> {
+};
+
+/**
+ * Build tool groups dynamically from generated commands.
+ * Each group is a 3-segment prefix (v-<action>-<target>).
+ *
+ * @internal — exported for testing only
+ */
+export function buildToolGroups(): Record<string, ToolGroup> {
   const groups: Record<string, ToolGroup> = {};
   const seen = new Set<string>();
   for (const c of allCommands) {
     if (HANDCRAFTED_COMMANDS.has(c.command)) continue;
-    // Build 3-segment prefix: v-<action>-<target>
     const parts = c.command.split("-");
     if (parts.length >= 3) {
       const prefix = parts.slice(0, 3).join("-");
@@ -505,19 +566,10 @@ function buildToolGroups(): Record<string, ToolGroup> {
   }
   return groups;
 }
-const TOOL_GROUPS = buildToolGroups();
 
-/**
- * Create the MCP server with all registered tools.
- *
- * The `config` parameter is narrowed via `Pick<Config, …>` so that callers
- * (typically `src/index.ts`) pass only the fields required at runtime
- * (`allowMutations`, `allowDestructive`, `allowSystem`, `toolProfile`).
- * This avoids coupling the tool layer to the full Config shape.
- */
 export function createServer(
   client: HestiaClient,
-  config: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem" | "longRunningTimeoutMs" | "toolProfile">
+  config: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem" | "allowManagement" | "longRunningTimeoutMs" | "toolProfile">
 ): McpServer {
   const server = new McpServer({ name: "hestiacp-mcp", version: "0.1.0" });
 
@@ -543,7 +595,7 @@ export function createServer(
           return {
             isError: true,
             content: [{ type: "text", text: formatError(details) }],
-            structuredContent: details
+            structuredContent: redact(details)
           };
         }
 
@@ -566,13 +618,16 @@ export function createServer(
           return {
             isError: true,
             content: [{ type: "text", text: formatError(details) }],
-            structuredContent: details
+            structuredContent: redact(details)
           };
         }
       }
     );
   }
 
+
+  const generatedToolMap = new Map<string, RegisteredTool>();
+  const TOOL_GROUPS = buildToolGroups();
 
   // ── Generated tool registration ──────────────────────────────────────────
   const enabledGenerated = new Set<string>();
@@ -581,7 +636,7 @@ export function createServer(
   for (const entry of allCommands) {
     if (HANDCRAFTED_COMMANDS.has(entry.command)) continue;
 
-    const schema: z.ZodObject<Record<string, z.ZodType>> = generatedSchema(entry);
+    const schema: z.ZodObject<Record<string, z.ZodType>> = _generatedSchema(entry);
     const risk = entryRiskClass(entry);
     // Register all, but immediately disable if profile === "curated"
     const tool = server.registerTool(
@@ -600,13 +655,12 @@ export function createServer(
           return {
             isError: true,
             content: [{ type: "text", text: formatError(details) }],
-            structuredContent: details
+            structuredContent: redact(details)
           };
         }
 
         try {
           const input = schema.parse(rawInput);
-          validateTmpFileArgs(entry, input);
           const args = generatedArgs(entry, input);
           const result = await client.execute(entry.command, args);
           const data = redact(result.data);
@@ -620,7 +674,7 @@ export function createServer(
           return {
             isError: true,
             content: [{ type: "text", text: formatError(details) }],
-            structuredContent: details
+            structuredContent: redact(details)
           };
         }
       }
@@ -685,9 +739,12 @@ export function createServer(
       const params = rawInput as { prefix: string; enabled: boolean };
       const { prefix, enabled: enable } = params;
 
-      // set_tool_group only toggles MCP-side tool visibility — it does not
-      // execute any HestiaCP commands, so no runtime gate-check is needed.
-      // (Individual tool gates still apply when those tools are called.)
+      // set_tool_group is a management operation (not a mutation)
+      const blockMsg = gateCheck("management", config);
+      if (blockMsg !== null) {
+        const details = errorDetails("set_tool_group", new Error(blockMsg));
+        return { isError: true, content: [{ type: "text", text: formatError(details) }], structuredContent: redact(details) };
+      }
 
       // Validate prefix matches at least one generated tool (prevents typos)
       const matched: string[] = [];
@@ -706,7 +763,7 @@ export function createServer(
 
       if (matched.length === 0) {
         const details = errorDetails("set_tool_group", new Error(`No generated tools match prefix '${prefix}'. Use list_tool_groups to see valid prefixes.`));
-        return { isError: true, content: [{ type: "text", text: formatError(details) }], structuredContent: details };
+        return { isError: true, content: [{ type: "text", text: formatError(details) }], structuredContent: redact(details) };
       }
 
       const structuredContent = {
