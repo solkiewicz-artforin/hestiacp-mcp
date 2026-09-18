@@ -436,6 +436,6 @@ describe("v-make-tmp-file", () => {
       arguments: { CONTENT: "hello world", FILENAME: "test123.txt" }
     });
     expect(result.isError).not.toBe(true);
-    expect(execute).toHaveBeenCalledWith("v-make-tmp-file", ["hello world", "test123.txt"]);
+    expect(execute).toHaveBeenCalledWith("v-make-tmp-file", ["hello world", "/tmp/test123.txt"]);
   });
 });

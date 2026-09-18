@@ -251,7 +251,7 @@ echo "${name} ran"
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("defaults unknown operation prefix to mutating with a warning", () => {
+  it("falls back to mutating with a warning on unknown operation prefix", () => {
     const dir = scratchUpstream([
       { name: "v-foobar-something", info: "Unknown operation", options: "THING" },
     ]);
@@ -259,6 +259,48 @@ echo "${name} ran"
     const cmd = findCmd(catalog, "v-foobar-something");
     expect(cmd.risk).toBe("mutating");
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ── JSON parse error logging (LOW #9) ──────────────────────────────────
+
+  it("fails gracefully when HESTIACP_RISK_OVERRIDES is invalid JSON", () => {
+    const dir = scratchUpstream([
+      { name: "v-list-users", info: "List users", options: "" },
+    ]);
+    const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), "gen-test-"));
+    const outFile = path.join(tmpdir, "commands.json");
+    const cmd = [
+      "node",
+      path.resolve(__dirname, "..", "scripts", "generate-commands.mjs"),
+      "--upstream", dir,
+      "--output", outFile,
+      "--noApiPseudo",
+    ];
+    const env = { ...process.env, HESTIACP_RISK_OVERRIDES: "not valid json {{{" };
+    expect(() => execSync(cmd.join(" "), { encoding: "utf-8", stdio: "pipe", env })).toThrow();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  });
+
+  it("fails when --riskOverrides file contains malformed JSON", () => {
+    const dir = scratchUpstream([
+      { name: "v-list-users", info: "List users", options: "" },
+    ]);
+    const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), "gen-test-"));
+    const outFile = path.join(tmpdir, "commands.json");
+    const badJson = path.join(tmpdir, "bad.json");
+    fs.writeFileSync(badJson, "{invalid json content}", "utf-8");
+    const cmd = [
+      "node",
+      path.resolve(__dirname, "..", "scripts", "generate-commands.mjs"),
+      "--upstream", dir,
+      "--output", outFile,
+      "--riskOverrides", badJson,
+      "--noApiPseudo",
+    ];
+    expect(() => execSync(cmd.join(" "), { encoding: "utf-8", stdio: "pipe" })).toThrow();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(tmpdir, { recursive: true, force: true });
   });
 
   // ── Edge cases ────────────────────────────────────────────────────────────

@@ -1,6 +1,20 @@
 import { Agent } from "undici";
 import type { Config } from "./config.js";
 
+/** Human-readable descriptions for common HestiaCP exit codes. */
+export const HESTIA_EXIT_CODES: Record<number, string> = {
+  0: "Success",
+  1: "General error (E_ARGS — missing or invalid arguments)",
+  2: "Object already exists (E_EXISTS)",
+  3: "Object not found (E_NOTEXIST)",
+  4: "Forbidden / not enough permissions (E_FORBIDDEN)",
+  5: "Invalid value (E_INVALID)",
+  6: "Disabled feature (E_DISABLED)",
+  7: "Admin-only operation (E_ADMIN)",
+  8: "Object is suspended (E_SUSPENDED)",
+  9: "Configuration error (E_CONFIGURE)",
+};
+
 export type HestiaResult = {
   command: string;
   exitCode: number;
@@ -90,6 +104,8 @@ async function readBoundedText(
     if (error instanceof HestiaApiError) {
       throw error;
     }
+    console.error(`[HestiaClient] Stream read error for command "${command}":`,
+      error instanceof Error ? error.message : String(error));
     throw new HestiaApiError(
       isTimeoutError(error)
         ? "HestiaCP response timed out; the remote command outcome is unknown, so verify state before retrying"
@@ -158,6 +174,8 @@ export class HestiaClient {
         dispatcher: this.#dispatcher
       } as RequestInit);
     } catch (error) {
+      console.error(`[HestiaClient] Request failed for command "${command}":`,
+        error instanceof Error ? error.message : String(error));
       const message =
         isTimeoutError(error)
           ? `HestiaCP request timed out after ${String(timeoutMs)}ms; the remote command outcome is unknown, so verify state before retrying`

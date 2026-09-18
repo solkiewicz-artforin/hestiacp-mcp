@@ -326,6 +326,170 @@ export function __generatedSchema(entry: CommandEntry): z.ZodObject<Record<strin
   return z.object(shape);
 }
 
+/**
+ * Classify a command entry's risk level.
+ */
+export function entryRiskClass(entry: CommandEntry): "read" | "mutating" | "destructive" | "system" {
+  return entry.risk;
+}
+
+/**
+ * Derive a human-readable tool title from a v-* command name.
+ */
+export function toolTitle(cmd: string): string {
+  return cmd.replace(/^v-/, "").replaceAll("-", " ");
+}
+
+/**
+ * Build a description string for a generated command entry.
+ */
+export function generatedDescription(entry: CommandEntry): string {
+  let desc = entry.description;
+  if (entry.notes) {
+    desc += ` (${entry.notes})`;
+  }
+  desc += ` Executes command ${entry.command}.`;
+  return desc;
+}
+
+function toolAnnotation(risk: string) {
+  return {
+    readOnlyHint: risk === "read",
+    destructiveHint: risk === "destructive" || risk === "system",
+    idempotentHint: risk === "read",
+    openWorldHint: true
+  };
+}
+
+/**
+ * Check whether a given risk level is allowed under the current config.
+ * Returns `null` if the operation is allowed, otherwise an error message.
+ */
+export function gateCheck(
+  risk: string,
+  cfg: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem">
+): string | null {
+  if (risk === "read") return null;
+  if (!cfg.allowMutations) {
+    return "Mutating tools are disabled. Set HESTIACP_ALLOW_MUTATIONS=true to enable them.";
+  }
+  if (risk === "mutating") return null;
+  if (!cfg.allowDestructive) {
+    return "Destructive tools are disabled. Set HESTIACP_ALLOW_DESTRUCTIVE=true as well as HESTIACP_ALLOW_MUTATIONS=true.";
+  }
+  if (risk === "system" && !cfg.allowSystem) {
+    return "System-level tools are disabled. Set HESTIACP_ALLOW_SYSTEM=true as well as HESTIACP_ALLOW_DESTRUCTIVE=true and HESTIACP_ALLOW_MUTATIONS=true.";
+  }
+  return null;
+}
+
+/**
+ * Build the positional argument array for a generated command invocation.
+ *
+ * HestiaCP uses positional CLI binding: every index maps to a specific argument,
+ * and empty strings act as placeholders for missing optional arguments.
+ *
+ * **Known limitation (#24):** When an optional argument at position N is omitted
+ * but a required argument at position N+1 is provided, the array keeps an empty
+ * string at position N. The HestiaCP CLI treats `""` as a valid (empty) positional
+ * value, which may have unintended side-effects for certain commands. This is a
+ * fundamental constraint of positional argument encoding — the only workaround
+ * would be per-command arg-remapping (as done for v-make-tmp-file). No upstream
+ * open-source `v-*` script exhibits this pathological ordering for mandatory args.
+ *
+ * Trailing empty strings are trimmed before invocation (the HestiaCP API does not
+ * require them).
+ */
+
+/**
+ * Validate filename for v-make-tmp-file inputs.
+ *
+ * Filenames must consist of alphanumeric characters, dots, underscores, and
+ * hyphens. A leading dot is allowed (e.g. ".htaccess", ".env").
+ * Returns the full path with `/tmp/` prepended to prevent path traversal.
+ */
+export function validateTmpFileArgs(filename: string): string {
+  const DOT_FILE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$|^\.[a-zA-Z0-9._-]+$/;
+  if (!DOT_FILE_RE.test(filename)) {
+    const safe = JSON.stringify(filename.length > 100 ? filename.slice(0, 100) + "…" : filename);
+    throw new Error(
+      `Invalid filename ${safe} for v-make-tmp-file. ` +
+      `Filename must match ${String(DOT_FILE_RE)}.`
+    );
+  }
+  return "/tmp/" + filename;
+}
+
+/**
+ * Trim trailing empty placeholders (without mutating the original array)
+ * and enforce the HestiaCP positional-arg cap.
+ */
+export function capArgs(result: string[]): string[] {
+  const trimmed = [...result];
+  while (trimmed.length > 0 && trimmed[trimmed.length - 1] === "") {
+    trimmed.pop();
+  }
+  if (trimmed.length > HESTIA_MAX_ARGS) {
+    throw new Error(
+      `Too many arguments (${String(trimmed.length)}). HestiaCP API limit is ${String(HESTIA_MAX_ARGS)}.`
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Build the CLI positional-argument array for a generated command.
+ */
+export function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): string[] {
+  // v-make-tmp-file requires two ordered arguments:
+  // arg1: file content (string, may contain multi-line or binary-safe data)
+  // arg2: optional filename (defaults to 'mcp-tmp' if empty)
+  if (entry.command === "v-make-tmp-file") {
+    const content = typeof input.CONTENT === "string" ? input.CONTENT : "";
+    const raw = typeof input.FILENAME === "string" ? basename(input.FILENAME) : "";
+    return capArgs([content, validateTmpFileArgs(raw)]);
+  }
+  const result: string[] = new Array<string>(entry.args.length).fill("");
+  for (let i = 0; i < entry.args.length; i++) {
+    const arg = entry.args[i];
+    if (!arg) continue;
+    const val: unknown = input[arg.name];
+    if (val !== undefined && val !== null) {
+      result[i] = typeof val === "string" ? val : JSON.stringify(val);
+    } else if (!arg.optional) {
+      throw new Error(`Missing required argument: ${arg.name} (position ${String(i + 1)})`);
+    }
+    // optional args missing stay as "" (placeholder — see JSDoc above)
+  }
+  return capArgs(result);
+}
+
+type ToolGroup = {
+  prefix: string;
+  description: string;
+};
+
+/**
+ * Build tool groups dynamically from generated commands.
+ * Each group is a 3-segment prefix (v-<action>-<target>).
+ */
+export function buildToolGroups(cmds: readonly Readonly<CommandEntry>[]): Record<string, ToolGroup> {
+  const groups: Record<string, ToolGroup> = {};
+  const seen = new Set<string>();
+  for (const c of cmds) {
+    if (HANDCRAFTED_COMMANDS.has(c.command)) continue;
+    const parts = c.command.split("-");
+    if (parts.length >= 3) {
+      const prefix = parts.slice(0, 3).join("-");
+      if (!seen.has(prefix)) {
+        seen.add(prefix);
+        groups[prefix] = { prefix, description: `Tools for ${prefix}` };
+      }
+    }
+  }
+  return groups;
+}
+
 export function createServer(
   client: HestiaClient,
   config: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem" | "longRunningTimeoutMs" | "toolProfile">
@@ -385,149 +549,8 @@ export function createServer(
   }
 
 
-  function entryRiskClass(entry: CommandEntry): "read" | "mutating" | "destructive" | "system" {
-  return entry.risk;
-}
-
-function toolTitle(cmd: string): string {
-  return cmd.replace(/^v-/, "").replaceAll("-", " ");
-}
-
-function generatedDescription(entry: CommandEntry): string {
-  let desc = entry.description;
-  if (entry.notes) {
-    desc += ` (${entry.notes})`;
-  }
-  desc += ` Executes command ${entry.command}.`;
-  return desc;
-}
-
-function toolAnnotation(risk: string) {
-  return {
-    readOnlyHint: risk === "read",
-    destructiveHint: risk === "destructive" || risk === "system",
-    idempotentHint: risk === "read",
-    openWorldHint: true
-  };
-}
-
-function gateCheck(
-  risk: string,
-  cfg: Pick<Config, "allowMutations" | "allowDestructive" | "allowSystem">
-): string | null {
-  if (risk === "read") return null;
-  if (!cfg.allowMutations) {
-    return "Mutating tools are disabled. Set HESTIACP_ALLOW_MUTATIONS=true to enable them.";
-  }
-  if (risk === "mutating") return null;
-  if (!cfg.allowDestructive) {
-    return "Destructive tools are disabled. Set HESTIACP_ALLOW_DESTRUCTIVE=true as well as HESTIACP_ALLOW_MUTATIONS=true.";
-  }
-  if (risk === "system" && !cfg.allowSystem) {
-    return "System-level tools are disabled. Set HESTIACP_ALLOW_SYSTEM=true as well as HESTIACP_ALLOW_DESTRUCTIVE=true and HESTIACP_ALLOW_MUTATIONS=true.";
-  }
-  return null;
-}
-
-/**
- * Build the positional argument array for a generated command invocation.
- *
- * HestiaCP uses positional CLI binding: every index maps to a specific argument,
- * and empty strings act as placeholders for missing optional arguments.
- *
- * **Known limitation (#24):** When an optional argument at position N is omitted
- * but a required argument at position N+1 is provided, the array keeps an empty
- * string at position N. The HestiaCP CLI treats `""` as a valid (empty) positional
- * value, which may have unintended side-effects for certain commands. This is a
- * fundamental constraint of positional argument encoding — the only workaround
- * would be per-command arg-remapping (as done for v-make-tmp-file). No upstream
- * 0pen-source `v-*` script exhibits this pathological ordering for mandatory args.
- *
- * Trailing empty strings are trimmed before invocation (the HestiaCP API does not
- * require them).
- */
-/**
- * Validate filename for v-make-tmp-file inputs.
- *
- * Filenames must consist of alphanumeric characters, dots, underscores, and
- * hyphens. A leading dot is allowed (e.g. ".htaccess", ".env").
- */
-function validateTmpFileArgs(filename: string): string {
-  const DOT_FILE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$|^\.[a-zA-Z0-9._-]+$/;
-  if (!DOT_FILE_RE.test(filename)) {
-    const safe = JSON.stringify(filename.length > 100 ? filename.slice(0, 100) + "…" : filename);
-    throw new Error(
-      `Invalid filename ${safe} for v-make-tmp-file. ` +
-      `Filename must match ${String(DOT_FILE_RE)}.`
-    );
-  }
-  return filename;
-}
-
-/**
- * Trim trailing empty placeholders and enforce the HestiaCP positional-arg cap.
- */
-function capArgs(result: string[]): string[] {
-  while (result.length > 0 && result[result.length - 1] === "") {
-    result.pop();
-  }
-  if (result.length > HESTIA_MAX_ARGS) {
-    throw new Error(
-      `Too many arguments (${String(result.length)}). HestiaCP API limit is ${String(HESTIA_MAX_ARGS)}.`
-    );
-  }
-  return result;
-}
-
-function generatedArgs(entry: CommandEntry, input: Record<string, unknown>): string[] {
-  // v-make-tmp-file requires two ordered arguments:
-  // arg1: file content (string, may contain multi-line or binary-safe data)
-  // arg2: optional filename (defaults to 'mcp-tmp' if empty)
-  if (entry.command === "v-make-tmp-file") {
-    const content = typeof input.CONTENT === "string" ? input.CONTENT : "";
-    const raw = typeof input.FILENAME === "string" ? basename(input.FILENAME) : "";
-    return capArgs([content, validateTmpFileArgs(raw)]);
-  }
-  const result: string[] = new Array<string>(entry.args.length).fill("");
-  for (let i = 0; i < entry.args.length; i++) {
-    const arg = entry.args[i];
-    if (!arg) continue;
-    const val: unknown = input[arg.name];
-    if (val !== undefined && val !== null) {
-      result[i] = typeof val === "string" ? val : JSON.stringify(val);
-    } else if (!arg.optional) {
-      throw new Error(`Missing required argument: ${arg.name} (position ${String(i + 1)})`);
-    }
-    // optional args missing stay as "" (placeholder — see JSDoc above)
-  }
-  return capArgs(result);
-}
-
-const generatedToolMap = new Map<string, RegisteredTool>();
-
-// Build TOOL_GROUPS dynamically from generated commands
-type ToolGroup = {
-  prefix: string;
-  description: string;
-}
-function buildToolGroups(): Record<string, ToolGroup> {
-  const groups: Record<string, ToolGroup> = {};
-  const seen = new Set<string>();
-  for (const c of allCommands) {
-    if (HANDCRAFTED_COMMANDS.has(c.command)) continue;
-    // Build 3-segment prefix: v-<action>-<target>
-    const parts = c.command.split("-");
-    if (parts.length >= 3) {
-      const prefix = parts.slice(0, 3).join("-");
-      if (!seen.has(prefix)) {
-        seen.add(prefix);
-        groups[prefix] = { prefix, description: `Tools for ${prefix}` };
-      }
-    }
-  }
-  return groups;
-}
-const TOOL_GROUPS = buildToolGroups();
+  const generatedToolMap = new Map<string, RegisteredTool>();
+  const TOOL_GROUPS = buildToolGroups(allCommands);
 
   // ── Generated tool registration ──────────────────────────────────────────
   const enabledGenerated = new Set<string>();

@@ -16,6 +16,10 @@
 
 ### Changed
 - **BREAKING**: `src/generated/handcrafted-commands.json` moved to `src/commands/handcrafted-commands.json`.
+  **Migration**: if your codebase imports or references `src/generated/handcrafted-commands.json`
+  directly, update the path to `src/commands/handcrafted-commands.json`.  The file format is
+  unchanged — only the location differs.  Downstream tools (including `scripts/generate-commands.mjs`)
+  automatically pick up the new location, so no additional configuration is required.
 - Test in `tests/generated.test.ts` now compares `HANDCRAFTED_COMMANDS` against the actual JSON file import, not a self-referential computation.
 - `sanitizeDescription` now handles CRLF line endings (`/(\r?\n){3,}/g`).
 - `sanitizeDescription` inline comments consolidated into a single clear doc-comment block.

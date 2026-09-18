@@ -52,7 +52,7 @@ const DESTRUCTIVE_PREFIXES = [
 const MUTATING_PREFIXES = [
   "add", "copy", "import", "backup", "schedule", "generate", "move",
   "rename", "sort", "create", "upload", "insert", "log", "dump",
-  "export", "extract", "download", "acknowledge", "sync"
+  "export", "extract", "download", "acknowledge", "sync", "quick"
 ];
 
 // ── Known API pseudo-commands (not in bin/) ────────────────────────────────
@@ -88,36 +88,53 @@ const HANDCRAFTED_COMMANDS = new Set(handcraftedCommandsArr);
  * actually matches so audit trails remain.
  */
 function sanitizeDescription(raw) {
-  let s = raw;
+  // Pipeline of sanitization transforms, applied in order.
+  const transforms = [
+    // 1. Strip control characters (keep \t, \n)
+    (s) => s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, (match) => {
+      console.warn(`[sanitize] Removed control character (0x${match.charCodeAt(0).toString(16)}) from description`);
+      return '';
+    }),
 
-  // Control characters (keep \t, \n)
-  s = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, (match) => {
-    console.warn(`[sanitize] Removed control character (0x${match.charCodeAt(0).toString(16)}) from description`);
-    return '';
-  });
+    // 2. Strip markdown code blocks (multiline)
+    (s) => s.replace(/```[\s\S]*?```/g, (match) => {
+      console.warn(`[sanitize] Removed code block from description: ${match.substring(0, 80)}...`);
+      return '';
+    }),
 
-  // Markdown code blocks
-  s = s.replace(/```[^]*?```/gs, (match) => {
-    console.warn(`[sanitize] Removed code block from description: ${match.substring(0, 80)}...`);
-    return '';
-  });
+    // 3. Strip javascript: URIs in links
+    (s) => s.replace(/\[.*?\]\(javascript:/gi, (match) => {
+      console.warn(`[sanitize] Removed javascript: URI from description`);
+      return '[link](';
+    }),
 
-  // javascript: URIs in links
-  s = s.replace(/\[.*?\]\(javascript:/gi, (match) => {
-    console.warn(`[sanitize] Removed javascript: URI from description`);
-    return '[link](';
-  });
+    // 4. Strip data: URIs that could be used for XSS (text/html, application/javascript, etc.)
+    (s) => s.replace(/data:(?:text\/html|application\/(?:javascript|x-javascript)|image\/svg\+xml)\s*,?[^\s)]*/gi, (match) => {
+      console.warn(`[sanitize] Removed data: URI from description`);
+      return '';
+    }),
 
-  // Double-brace injection patterns
-  s = s.replace(/\{\{[{}]*\}\}/g, (match) => {
-    console.warn(`[sanitize] Removed double-brace pattern from description`);
-    return '';
-  });
+    // 5. Strip <script> tags (inline and with attributes)
+    (s) => s.replace(/<script[\s>][\s\S]*?<\/script\s*>/gi, (match) => {
+      console.warn(`[sanitize] Removed <script> tag from description`);
+      return '';
+    }),
 
-  // Collapse long newline runs (supports CRLF and LF)
-  s = s.replace(/(\r?\n){3,}/g, '\n\n');
+    // 6. Strip double-brace injection patterns (multiline-aware)
+    (s) => s.replace(/\{\{[\s\S]*?\}\}/g, (match) => {
+      console.warn(`[sanitize] Removed double-brace pattern from description`);
+      return '';
+    }),
 
-  return s.trim();
+    // 7. Collapse long newline runs (supports CRLF and LF)
+    (s) => s.replace(/(\r?\n){3,}/g, '\n\n'),
+  ];
+
+  let result = raw;
+  for (const tx of transforms) {
+    result = tx(result);
+  }
+  return result.trim();
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -200,10 +217,12 @@ function computeAutoRisk(name) {
     return "mutating";
   }
 
-  // 5. No match — default to mutating with a warning
-  console.warn(
-    `Unknown operation prefix "${opPrefix}" for command "${name}". ` +
-    `Defaulting to "mutating" risk. Add a manual override in src/generated/risk-overrides.json if needed.`
+  // 5. No match — warn and fall back to "mutating"
+  process.stderr.write(
+    `[WARN] Unknown operation prefix "${opPrefix}" for command "${name}". ` +
+    `Cannot determine risk classification. Defaulting to "mutating". Add the prefix to a known ` +
+    `list (READ_PREFIXES, MUTATING_PREFIXES, DESTRUCTIVE_PREFIXES) in scripts/generate-commands.mjs, ` +
+    `or add a manual override in src/generated/risk-overrides.json.\n`
   );
   return "mutating";
 }
@@ -306,7 +325,11 @@ if (envOverrides) {
   try {
     overrides = JSON.parse(readFileSync(OVERRIDES_PATH, "utf-8"));
   } catch (e) {
-    console.warn("Warning: no risk-overrides.json found — proceeding without overrides", e);
+    if (e.code === "ENOENT") {
+      console.warn("Warning: no risk-overrides.json found — proceeding without overrides");
+    } else {
+      console.error("Failed to parse risk-overrides.json — proceeding without overrides:", e.message);
+    }
   }
 }
 
