@@ -9,7 +9,7 @@
 - `validateTmpFileArgs()` helper that validates safe temp-file names — now allows dot-files (`.htaccess`, `.env`).
 - `capArgs()` shared helper in `src/tools.ts` for trailing-trim + MAX_ARGS validation.
 - Startup schema validation in `createServer()` that logs warnings for any broken tool schemas.
-- `__generatedSchema()` exported for test use.
+- `_generatedSchema()` exported for test use.
 - `redact()` now applied to `structuredContent` in all error responses (handcrafted and generated tool handlers).
 - Smoke test in `tests/generated.test.ts`: `safeParse({})` assertions for all command entry schemas.
 - CHANGELOG.md (this file).
@@ -29,6 +29,7 @@
 ### Fixed
 - Tautological test in `tests/generated.test.ts` — `HANDCRAFTED_COMMANDS` comparison now validates against JSON file.
 - Validate-tmp-file regex now permits leading dots (`.htaccess`, `.env` filenames).
+- `safeError(null)` and `safeError(undefined)` now return `"Unknown error"` instead of `""` — prevents empty error messages in telemetry and logs.
 
 ### Removed
 - `resolveJsonModule: true` from `tsconfig.json` (unnecessary with `with { type: "json" }` import assertions).

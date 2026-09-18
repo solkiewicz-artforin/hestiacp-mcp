@@ -42,3 +42,8 @@ export async function main(): Promise<void> {
   await server.connect(transport);
   console.error("hestiacp-mcp ready on stdio");
 }
+
+// Re-export for programmatic MCP integration
+export { createServer } from "./tools.js";
+export type { HestiaClient } from "./client.js";
+export type { Config } from "./config.js";

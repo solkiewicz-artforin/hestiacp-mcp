@@ -195,7 +195,10 @@ npm run generate:commands -- --upstream /tmp/hestiacp-upstream
 
 Generator flags:
 - `--upstream <path>` — path to a HestiaCP checkout (required)
-- `--force` — overwrite `commands.json` even if it already exists
+- `--force` — Allow risk-level downgrades in auto-classified commands
+  (warning emitted).
+- `--output, -o <path>` — Custom output file path (default:
+  `src/generated/commands.json`).
 - `--noApiPseudo` — skip emitting pseudo-tools (e.g. `v-log-api`); useful for
   generating a catalog that matches an older HestiaCP release
 - `--riskOverrides <path>` — path to a JSON file with per-risk overrides (e.g.

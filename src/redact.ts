@@ -10,15 +10,15 @@ const SENSITIVE_KEY_NAMES = [
   "key",
 ] as const;
 
-/** Regex matching sensitive key names for object-key redaction. */
+/** Regex matching sensitive key names for object-key redaction, with word boundaries. */
 const SECRET_KEYS_RE = new RegExp(
-  SENSITIVE_KEY_NAMES.map((k) => `(?:${k})`).join("|"),
+  SENSITIVE_KEY_NAMES.map((k) => `(?<![a-z])${k}(?![a-z])`).join("|"),
   "i"
 );
 
 /** Regex matching sensitive key=value patterns in error strings. */
 const SAFE_ERROR_SENSITIVE_RE = new RegExp(
-  `(\\b(?:-{1,2})?(?:${SENSITIVE_KEY_NAMES.map((k) => `${k}_?(?:key)?`).join("|")})\\b\\s*(?:[=:]\\s*)?\\s*)("[^"]*"|'[^']*'|[^\\s,;]+)`,
+  `(\\b(?:-{1,2})?(?:${SENSITIVE_KEY_NAMES.map((k) => `\\b${k}_?(?:key)?\\b`).join("|")})\\b\\s*(?:[=:]\\s*)?\\s*)("[^"]*"|'[^']*'|[^\\s,;]+)`,
   "gi"
 );
 
@@ -54,6 +54,14 @@ export function redact(value: unknown): unknown {
  *
  * Replaces patterns like `access_key=abc123` or `password: "secret"` with
  * `[REDACTED]`, keeping the key name intact for debuggability.
+ *
+ * When {@link error} is not an Error instance (e.g. `null`, `undefined`, or a
+ * raw string), the function returns `"Unknown error"`. This is a deliberate
+ * safety measure — the function never returns `null`, `undefined`, or the raw
+ * input, so callers can always use the result as a string without null checks.
+ * This was changed from a previous version that returned `""` for `null`; the
+ * current behavior is more resilient in logging contexts where the output must
+ * never be empty.
  *
  * @param error - The error to sanitize. Can be an Error instance or any value.
  * @returns A string safe for logging and telemetry.

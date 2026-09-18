@@ -17,17 +17,18 @@ async function connected(
     allowMutations?: boolean;
     allowDestructive?: boolean;
     allowSystem?: boolean;
+    allowManagement?: boolean;
     toolProfile?: "all" | "curated";
   } = { allowMutations: false, allowDestructive: false }
 ): Promise<Client> {
   const server = createServer(
     { execute } as HestiaClient,
     {
-      allowMutations: false,
-      allowDestructive: false,
-      allowSystem: false,
-      toolProfile: "all",
-      ...safety,
+      allowMutations: safety.allowMutations ?? false,
+      allowDestructive: safety.allowDestructive ?? false,
+      allowSystem: safety.allowSystem ?? false,
+      allowManagement: safety.allowManagement ?? safety.allowMutations ?? false,
+      toolProfile: safety.toolProfile ?? "all",
       longRunningTimeoutMs: 900_000,
     }
   );

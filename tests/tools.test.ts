@@ -100,10 +100,11 @@ describe("gateCheck", () => {
     allowMutations: true,
     allowDestructive: true,
     allowSystem: true,
+    allowManagement: true,
   };
 
   it("passes read-risk commands regardless of settings", () => {
-    expect(gateCheck("read", { allowMutations: false, allowDestructive: false, allowSystem: false })).toBeNull();
+    expect(gateCheck("read", { allowMutations: false, allowDestructive: false, allowSystem: false, allowManagement: false })).toBeNull();
   });
 
   it("blocks mutating when allowMutations is false", () => {
@@ -137,7 +138,7 @@ describe("gateCheck", () => {
   });
 
   it("requires allowMutations for destructive and system", () => {
-    const noMutations = { allowMutations: false, allowDestructive: true, allowSystem: true };
+    const noMutations = { allowMutations: false, allowDestructive: true, allowSystem: true, allowManagement: false };
     expect(gateCheck("destructive", noMutations)).toContain("HESTIACP_ALLOW_MUTATIONS");
     expect(gateCheck("system", noMutations)).toContain("HESTIACP_ALLOW_MUTATIONS");
   });
