@@ -20,10 +20,8 @@ import { readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import handcraftedCommandsArr from "../src/commands/handcrafted-commands.json" with { type: "json" };
-import constants from "../src/generated/constants.json" with { type: "json" };
-
-/** Must match HESTIA_MAX_ARGS in src/tools.ts (read from constants.json). */
-const MAX_ARGS = constants.MAX_ARGS;
+/** Must match HESTIA_MAX_ARGS in src/tools.ts. */
+const MAX_ARGS = 13;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -92,41 +90,34 @@ function sanitizeDescription(raw) {
   const transforms = [
     // 1. Strip control characters (keep \t, \n)
     (s) => s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, (match) => {
-      console.warn(`[sanitize] Removed control character (0x${match.charCodeAt(0).toString(16)}) from description`);
+      process.stderr.write(`[asanitize] Removed control character (0x${match.charCodeAt(0).toString(16)}) from description\n`);
       return '';
     }),
 
     // 2. Strip markdown code blocks (multiline)
     (s) => s.replace(/```[\s\S]*?```/g, (match) => {
-      console.warn(`[sanitize] Removed code block from description: ${match.substring(0, 80)}...`);
+      process.stderr.write(`[asanitize] Removed code block from description: ${match.substring(0, 80)}...\n`);
       return '';
     }),
 
-    // 3. Strip javascript: URIs in links
-    (s) => s.replace(/\[.*?\]\(javascript:/gi, (match) => {
-      console.warn(`[sanitize] Removed javascript: URI from description`);
-      return '[link](';
-    }),
 
-    // 4. Strip data: URIs that could be used for XSS (text/html, application/javascript, etc.)
-    (s) => s.replace(/data:(?:text\/html|application\/(?:javascript|x-javascript)|image\/svg\+xml)\s*,?[^\s)]*/gi, (match) => {
-      console.warn(`[sanitize] Removed data: URI from description`);
+    // 3. Strip double-brace injection patterns (single-line only)
+    (s) => s.replace(/\{\{[^}]*\}\}/g, (match) => {
+      process.stderr.write(`[asanitize] Removed double-brace pattern from description\n`);
       return '';
     }),
 
-    // 5. Strip <script> tags (inline and with attributes)
-    (s) => s.replace(/<script[\s>][\s\S]*?<\/script\s*>/gi, (match) => {
-      console.warn(`[sanitize] Removed <script> tag from description`);
+    // 4. Strip <img onerror> and <svg onload> XSS payloads
+    (s) => s.replace(/<img\s+[^>]*\bonerror\b[^>]*\/?>/gi, (match) => {
+      process.stderr.write(`[asanitize] Removed <img onerror> from description\n`);
+      return '';
+    }),
+    (s) => s.replace(/<svg\s+[^>]*\bonload\b[^>]*>[\s\S]*?<\/svg\s*>/gi, (match) => {
+      process.stderr.write(`[asanitize] Removed <svg onload> from description\n`);
       return '';
     }),
 
-    // 6. Strip double-brace injection patterns (multiline-aware)
-    (s) => s.replace(/\{\{[\s\S]*?\}\}/g, (match) => {
-      console.warn(`[sanitize] Removed double-brace pattern from description`);
-      return '';
-    }),
-
-    // 7. Collapse long newline runs (supports CRLF and LF)
+    // 5. Collapse long newline runs (supports CRLF and LF)
     (s) => s.replace(/(\r?\n){3,}/g, '\n\n'),
   ];
 
@@ -181,7 +172,7 @@ function classifyRisk(name, overrides, force) {
     if (overrideSev !== undefined && computedSev !== undefined && overrideSev < computedSev) {
       const msg = `Risk downgrade for "${name}": auto-classified as "${computed}" but override forces "${override}"`;
       if (force) {
-        console.warn(`[downgrade] ${msg} (--force applied)`);
+        process.stderr.write(`[adowngrade] ${msg} (--force applied)\n`);
       } else {
         throw new Error(`${msg}. Use --force to accept this downgrade.`);
       }
