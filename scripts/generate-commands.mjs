@@ -9,7 +9,7 @@
  * Options:
  *   --force               Allow risk downgrades (warning emitted).
  *   --noApiPseudo         Omit API pseudo-commands.
- *   --riskOverrides <path>  Custom risk overrides JSON file.
+ *   --risk-overrides <path>  Custom risk overrides JSON file (alias: --riskOverrides).
  *   --output, -o <path>   Custom output file path (default: src/generated/commands.json).
  * Outputs:
  *   src/generated/commands.json — versioned catalog
@@ -21,7 +21,7 @@ import { readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import handcraftedCommandsArr from "../src/commands/handcrafted-commands.json" with { type: "json" };
-/** Must match HESTIA_MAX_ARGS in src/tools.ts. */
+/** Must match HESTIA_MAX_ARGS in src/constants.ts (plain .mjs cannot import TS). */
 const MAX_ARGS = 13;
 
 /** Maximum length of a code block preview emitted in audit messages. */
@@ -47,14 +47,16 @@ const SYSTEM_PATTERNS = ["-sys-"];
 
 const DESTRUCTIVE_PREFIXES = [
   "delete", "change", "update", "rebuild", "restart", "suspend",
-  "unsuspend", "restore", "remove", "replace", "set", "enable",
+  "restore", "remove", "replace", "set", "enable",
   "disable", "start", "stop", "purge", "flush", "clean", "repair", "revoke"
 ];
 
 const MUTATING_PREFIXES = [
   "add", "copy", "import", "backup", "schedule", "generate", "move",
   "rename", "sort", "create", "upload", "insert", "log", "dump",
-  "export", "extract", "download", "acknowledge", "sync", "quick"
+  "export", "extract", "download", "acknowledge", "sync", "quick",
+  // Reverses a suspension (restores access); not data-destroying.
+  "unsuspend"
 ];
 
 // ── Known API pseudo-commands (not in bin/) ────────────────────────────────
@@ -110,40 +112,40 @@ function sanitizeDescription(raw) {
 
 
     // 3. Strip double-brace injection patterns (single-line only)
-    (s) => s.replace(/\{\{[^}]*\}\}/g, (match) => {
+    (s) => s.replace(/\{\{[^}]*\}\}/g, () => {
       audit.push("Removed double-brace pattern from description");
       return '';
     }),
 
     // 4. Strip <img onerror> and <svg onload> XSS payloads
-    (s) => s.replace(/<img\s+[^>]*\bonerror\b[^>]*\/?>/gi, (match) => {
+    (s) => s.replace(/<img\s+[^>]*\bonerror\b[^>]*\/?>/gi, () => {
       audit.push("Removed <img onerror> from description");
       return '';
     }),
-    (s) => s.replace(/<svg\s+[^>]*\bonload\b[^>]*>[\s\S]*?<\/svg\s*>/gi, (match) => {
+    (s) => s.replace(/<svg\s+[^>]*\bonload\b[^>]*>[\s\S]*?<\/svg\s*>/gi, () => {
       audit.push("Removed <svg onload> from description");
       return '';
     }),
 
-    // 4a. Strip <script>...</script> tags (XSS vectors)
-    (s) => s.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, (match) => {
+    // 5. Strip <script>...</script> tags (XSS vectors)
+    (s) => s.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, () => {
       audit.push("Removed <script> tag from description");
       return '';
     }),
 
-    // 4b. Strip javascript: URIs (inline XSS in markdown links)
-    (s) => s.replace(/\[.*?\]\(javascript:/gi, '[link](', (match) => {
+    // 6. Strip javascript: URIs (inline XSS in markdown links)
+    (s) => s.replace(/\[.*?\]\(javascript:/gi, () => {
       audit.push("Removed javascript: URI from description");
       return '[link](';
     }),
 
-    // 4c. Strip data: URIs (text/html, application/javascript)
+    // 7. Strip data: URIs (text/html, application/javascript)
     (s) => s.replace(/\bdata:(?:text\/html|application\/(?:javascript|x-javascript))\b[^\s]*/gi, (match) => {
       audit.push("Removed data: URI from description");
       return '[blocked]';
     }),
 
-    // 5. Collapse long newline runs (supports CRLF and LF)
+    // 8. Collapse long newline runs (supports CRLF and LF)
     (s) => s.replace(/(\r?\n){3,}/g, '\n\n'),
   ];
 
@@ -211,6 +213,28 @@ function classifyRisk(name, overrides) {
   return { risk: computed, downgraded: false, computed, unknown };
 }
 
+/** Apply downgrade/unknown-prefix policy to a classifyRisk result; returns the final risk. */
+function resolveRisk(name, overrides, force) {
+  const r = classifyRisk(name, overrides);
+  if (r.downgraded) {
+    const msg = `Risk downgrade for "${name}": auto-classified as "${r.computed}" but override forces "${r.risk}"`;
+    if (force) {
+      process.stderr.write(`[adowngrade] ${msg} (--force applied)\n`);
+    } else {
+      throw new Error(`${msg}. Use --force to accept this downgrade.`);
+    }
+  }
+  if (r.unknown) {
+    throw new Error(
+      `Unknown operation prefix for "${name}": auto-classified risk is "${r.risk}". ` +
+      `Supported prefixes: read (${READ_PREFIXES.slice(0, 5).join(", ")}...), ` +
+      `mutating (${MUTATING_PREFIXES.slice(0, 5).join(", ")}...), ` +
+      `destructive (${DESTRUCTIVE_PREFIXES.slice(0, 5).join(", ")}...).`
+    );
+  }
+  return r.risk;
+}
+
 /** Compute the automatic risk classification without override consideration. */
 function computeAutoRisk(name) {
   const withoutV = name.replace(/^v-/, "");
@@ -274,11 +298,12 @@ function parseScript(filePath) {
   const { result: usageExample, audit: exampleAudit } = sanitizeDescription(exampleRaw || "");
 
   // Emit sanitization audit trail
-  for (const entry of descAudit) {
-    process.stderr.write(`[aaudit:description] ${entry}\n`);
-  }
-  for (const entry of exampleAudit) {
-    process.stderr.write(`[aaudit:usageExample] ${entry}\n`);
+  for (const [field, entries] of [["description", descAudit], ["usageExample", exampleAudit]]) {
+    for (const entry of entries) {
+      process.stderr.write(
+        `[aaudit:${field}] ${JSON.stringify({ ts: new Date().toISOString(), command: name, field, message: entry })}\n`
+      );
+    }
   }
 
   const args = optionsRaw ? parseArgsFromHeader(`# options: ${optionsRaw}`) : [];
@@ -303,12 +328,14 @@ const { values } = parseArgs({
     upstream: { type: "string", short: "u" },
     output: { type: "string", short: "o" },
     riskOverrides: { type: "string" },
+    "risk-overrides": { type: "string" },
     noApiPseudo: { type: "boolean", default: false },
     force: { type: "boolean", default: false }
   }
 });
 
 // Resolve output path: --output flag, or default
+const RISK_OVERRIDES_FILE = values["risk-overrides"] || values.riskOverrides;
 const OUTPUT_PATH = values.output || DEFAULT_OUTPUT_PATH;
 
 if (!values.upstream) {
@@ -327,7 +354,7 @@ try {
 
 // Load manual risk overrides — three sources, highest priority first:
 // 1. HESTIACP_RISK_OVERRIDES env var (JSON string) — for testability
-// 2. --riskOverrides <path> CLI flag
+// 2. --risk-overrides <path> CLI flag (--riskOverrides is a legacy alias)
 // 3. src/generated/risk-overrides.json (default, versioned)
 let overrides = {};
 const envOverrides = process.env.HESTIACP_RISK_OVERRIDES;
@@ -338,11 +365,11 @@ if (envOverrides) {
     console.error("Error: HESTIACP_RISK_OVERRIDES is not valid JSON", e);
     process.exit(1);
   }
-} else if (values.riskOverrides) {
+} else if (RISK_OVERRIDES_FILE) {
   try {
-    overrides = JSON.parse(readFileSync(values.riskOverrides, "utf-8"));
+    overrides = JSON.parse(readFileSync(RISK_OVERRIDES_FILE, "utf-8"));
   } catch (e) {
-    console.error(`Error: cannot parse --riskOverrides file "${values.riskOverrides}"`, e);
+    console.error(`Error: cannot parse --risk-overrides file "${RISK_OVERRIDES_FILE}"`, e);
     process.exit(1);
   }
 } else {
@@ -371,24 +398,7 @@ for (const script of scripts) {
       `The HestiaCP REST API truncates all arguments beyond the ${MAX_ARGS}th position.`
     );
   }
-  const riskResult = classifyRisk(cmd.name, overrides);
-  if (riskResult.downgraded) {
-    const msg = `Risk downgrade for "${cmd.name}": auto-classified as "${riskResult.computed}" but override forces "${riskResult.risk}"`;
-    if (values.force) {
-      process.stderr.write(`[adowngrade] ${msg} (--force applied)\n`);
-    } else {
-      throw new Error(`${msg}. Use --force to accept this downgrade.`);
-    }
-  }
-  if (riskResult.unknown) {
-    throw new Error(
-      `Unknown operation prefix for "${cmd.name}": auto-classified risk is "${riskResult.risk}". ` +
-      `Supported prefixes: read (${READ_PREFIXES.slice(0, 5).join(", ")}...), ` +
-      `mutating (${MUTATING_PREFIXES.slice(0, 5).join(", ")}...), ` +
-      `destructive (${DESTRUCTIVE_PREFIXES.slice(0, 5).join(", ")}...).`
-    );
-  }
-  cmd.risk = riskResult.risk;
+  cmd.risk = resolveRisk(cmd.name, overrides, values.force);
   cmd.notes = determineNotes(cmd.name, cmd.args, cmd.risk);
   cmd.fileArg = cmd.notes.includes("Requires a file path on the SERVER side");
   commands.push(cmd);
@@ -397,24 +407,7 @@ for (const script of scripts) {
 // Add API pseudo-commands
 if (!values.noApiPseudo) {
   for (const pseudo of API_PSEUDO_COMMANDS) {
-    const pseudoRisk = classifyRisk(pseudo.name, overrides);
-    if (pseudoRisk.downgraded) {
-      const msg = `Risk downgrade for "${pseudo.name}": auto-classified as "${pseudoRisk.computed}" but override forces "${pseudoRisk.risk}"`;
-      if (values.force) {
-        process.stderr.write(`[adowngrade] ${msg} (--force applied)\n`);
-      } else {
-        throw new Error(`${msg}. Use --force to accept this downgrade.`);
-      }
-    }
-    if (pseudoRisk.unknown) {
-      throw new Error(
-        `Unknown operation prefix for "${pseudo.name}": auto-classified risk is "${pseudoRisk.risk}". ` +
-        `Supported prefixes: read (${READ_PREFIXES.slice(0, 5).join(", ")}...), ` +
-        `mutating (${MUTATING_PREFIXES.slice(0, 5).join(", ")}...), ` +
-        `destructive (${DESTRUCTIVE_PREFIXES.slice(0, 5).join(", ")}...).`
-      );
-    }
-    pseudo.risk = pseudoRisk.risk;
+    pseudo.risk = resolveRisk(pseudo.name, overrides, values.force);
     commands.push(pseudo);
   }
 }

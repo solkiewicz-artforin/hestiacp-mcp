@@ -21,11 +21,13 @@ describe("secret redaction", () => {
       .toBe("HESTIACP_ACCESS_KEY: Invalid input");
   });
 
-  it("returns 'Unknown error' for non-Error input", () => {
-    expect(safeError(null)).toBe("Unknown error");
-    expect(safeError(undefined)).toBe("Unknown error");
-    expect(safeError("plain string")).toBe("Unknown error");
-    expect(safeError(42)).toBe("Unknown error");
+  it("handles non-Error input", () => {
+    expect(safeError(null)).toBe("");
+    expect(safeError(undefined)).toBe("");
+    expect(safeError("plain string")).toBe("plain string");
+    expect(safeError(42)).toBe("42");
+    expect(safeError({ a: 1 })).toBe('{"a":1}');
+    expect(safeError("password=hunter2")).toContain("[REDACTED]");
   });
 
   it("redacts secrets in array items", () => {

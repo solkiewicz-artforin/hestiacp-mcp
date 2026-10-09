@@ -7,7 +7,8 @@ import { redact, safeError } from "./redact.js";
 import { allCommands, type CommandEntry } from "./generated/commands.js";
 import handcraftedCommandsArr from "./commands/handcrafted-commands.json" with { type: "json" };
 
-export const HESTIA_MAX_ARGS = 13;
+import { HESTIA_MAX_ARGS } from "./constants.js";
+export { HESTIA_MAX_ARGS };
 
 /**
  * Maximum size in bytes of content accepted by v-make-tmp-file.
@@ -201,7 +202,7 @@ function formatError(details: ReturnType<typeof errorDetails>): string {
       : `HTTP ${String(details.error.httpStatus)}`,
     details.error.outcomeUnknown ? "outcome unknown" : undefined
   ].filter((value): value is string => value !== undefined);
-  return `[${metadata.join(", ")}] ${details.error.message}`;
+  return redact(`[${metadata.join(", ")}] ${details.error.message}`) as string;
 }
 
 export const commandSpecs: readonly CommandSpec[] = [
@@ -343,6 +344,9 @@ export function _generatedSchema(entry: CommandEntry): z.ZodObject<Record<string
   return z.object(shape);
 }
 
+/** @deprecated Use `_generatedSchema`; kept as an alias for backward compatibility. */
+export const generatedSchema = _generatedSchema;
+
 /**
  * Classify a command entry's risk level.
  */
@@ -388,8 +392,8 @@ function toolAnnotation(risk: string) {
  * Returns `null` if the operation is allowed, otherwise an error message.
  *
  * @param risk - The operation's risk classification (read, mutating, destructive, system, management).
- *   "management" controls administrative operations like set_tool_group; it defaults to
- *   the same gating as "mutating" unless allowManagement is explicitly configured.
+ *   "management" controls administrative operations like set_tool_group. The fallback to
+ *   allowMutations when HESTIACP_ALLOW_MANAGEMENT is unset is resolved in loadConfig, not here.
  * @param cfg - Current gate configuration.
  */
 export function gateCheck(
@@ -399,7 +403,7 @@ export function gateCheck(
   if (risk === "read") return null;
   if (risk === "management") {
     // Dedicated gate for administrative tool-group operations.
-    // Falls back to allowMutations if allowManagement is not set (backward compat).
+    // The allowMutations fallback is resolved in loadConfig.
     if (!cfg.allowManagement) {
       return "Management operations are disabled. Set HESTIACP_ALLOW_MANAGEMENT=true to enable them.";
     }
@@ -420,8 +424,9 @@ export function gateCheck(
 
 /**
  * Heuristic binary-content detector.
- * Returns true if the first 512 bytes contain a non-trivial number of
- * non-printable, non-whitespace characters — a strong signal of binary data.
+ * Returns true if the first `sampleSize` characters contain more than three
+ * control characters (other than TAB/LF/CR), DEL, or U+FFFD replacement chars.
+ * Non-ASCII text (accents, CJK, emoji) is never considered binary.
  *
  * @internal
  */
@@ -430,10 +435,11 @@ export function isLikelyBinary(content: string, sampleSize = 512): boolean {
   let nonPrintable = 0;
   for (let i = 0; i < sample.length; i++) {
     const code = sample.charCodeAt(i);
-    // Allow: TAB(9), LF(10), CR(13), space(32)-~(126), and common UTF-8 multi-byte lead bytes (0xC0+)
-    if (code === 9 || code === 10 || code === 13) continue;
-    if (code >= 32 && code <= 126) continue;
-    if (code >= 0xC0) continue;
+    // Input is a decoded JS string (UTF-16 code units), not raw bytes. Suspicious:
+    // C0 controls except TAB/LF/CR, DEL (0x7F), and U+FFFD (failed decoding).
+    const suspicious =
+      (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 0x7f || code === 0xfffd;
+    if (!suspicious) continue;
     nonPrintable++;
     if (nonPrintable > 3) return true;
   }
@@ -463,7 +469,10 @@ export function isLikelyBinary(content: string, sampleSize = 512): boolean {
  *
  * Filenames must consist of alphanumeric characters, dots, underscores, and
  * hyphens. A leading dot is allowed (e.g. ".htaccess", ".env").
- * Returns the full path with `/tmp/` prepended to prevent path traversal.
+ * Returns the full path with `/tmp/` unconditionally prepended to prevent path
+ * traversal. An empty filename yields `"/tmp/"` (HestiaCP then applies its default).
+ * Callers must pass a bare filename (use `basename()` first); names containing
+ * `/` are rejected.
  */
 export function validateTmpFilePath(filename: string): string {
   if (filename === "." || filename === "..") {
@@ -510,9 +519,10 @@ export function generatedArgs(entry: CommandEntry, input: Record<string, unknown
   if (entry.command === "v-make-tmp-file") {
     const content = typeof input.CONTENT === "string" ? input.CONTENT : "";
     // Content validation (C2): reject oversized, null-byte, and binary payloads
-    if (content.length > HESTIACP_MAX_TMP_FILE_SIZE) {
+    const contentBytes = new TextEncoder().encode(content).length;
+    if (contentBytes > HESTIACP_MAX_TMP_FILE_SIZE) {
       throw new Error(
-        `Content too large (${String(content.length)} bytes). Maximum allowed size is ${String(HESTIACP_MAX_TMP_FILE_SIZE)} bytes.`
+        `Content too large (${String(contentBytes)} bytes). Maximum allowed size is ${String(HESTIACP_MAX_TMP_FILE_SIZE)} bytes.`
       );
     }
     if (content.includes("\x00")) {

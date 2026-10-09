@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2025-01-01
+
+### Changed
+- `v-unsuspend-*` commands are now classified `mutating` (they restore access, not destroy data).
+- `safeError(null | undefined)` returns `""`; strings are scrubbed and objects JSON-stringified (M1).
+- Error `structuredContent` and text are passed through `redact()` (M3, H6).
+- `HESTIACP_ALLOW_MANAGEMENT` falls back to `HESTIACP_ALLOW_MUTATIONS` only when unset (`??`, H4).
+- `CommandEntry.argMap` removed (H10); regenerate catalogs and migrate custom code that read it.
+- `_generatedSchema` is canonical; `generatedSchema` kept as a deprecated alias (H9).
+- Generator: `--risk-overrides` flag (alias `--riskOverrides`), JSON audit lines, shared `resolveRisk` helper.
+- Startup emits `[astartup]` with effective profile and gates.
+- MAX_ARGS lives in `src/constants.ts` (`HESTIA_MAX_ARGS`); tmp-file size check uses UTF-8 byte length.
+
 ### Added
 - `--force` flag on `scripts/generate-commands.mjs` to allow risk downgrades (warning emitted when used).
 - Audit signals (`console.warn`) in `sanitizeDescription` when code fences, `javascript:` URIs, or double-brace patterns are found and modified.

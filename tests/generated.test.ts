@@ -84,8 +84,8 @@ describe("generated command catalog", () => {
     // Snapshot — these are exported from the versioned commands.json.
     expect(counts).toStrictEqual({
       read: 119,
-      mutating: 104,
-      destructive: 225,
+      mutating: 122,
+      destructive: 207,
       system: 77
     });
     expect(counts.read + counts.mutating + counts.destructive + counts.system).toBe(
@@ -263,7 +263,7 @@ describe("generated command catalog", () => {
 // ── Determinism of codegen ─────────────────────────────────────────────────
 
 describe("generator determinism", () => {
-  it("re-running on the same upstream yields byte-identical commands.json", () => {
+  it.skipIf(!fs.existsSync("/tmp/hestiacp-upstream/bin"))("re-running on the same upstream yields byte-identical commands.json", () => {
     const cwd = path.resolve(fileURLToPath(import.meta.url), "..", "..");
     const outFile = path.join(cwd, "src", "generated", "commands.json");
 

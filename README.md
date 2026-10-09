@@ -47,6 +47,7 @@ The server communicates only over stdin/stdout. Diagnostics go to stderr so they
 | `HESTIACP_MAX_RESPONSE_BYTES` | no | `1000000` | Maximum accepted response size. |
 | `HESTIACP_TLS_REJECT_UNAUTHORIZED` | no | `true` | TLS certificate and hostname verification. Disabling is for isolated development only. |
 | `HESTIACP_ALLOW_MUTATIONS` | no | `false` | Enables additive and state-changing tools. |
+| `HESTIACP_ALLOW_MANAGEMENT` | no | value of `HESTIACP_ALLOW_MUTATIONS` | Enables tool-group management tools (`set_tool_group`). Falls back to `HESTIACP_ALLOW_MUTATIONS` when unset. |
 | `HESTIACP_ALLOW_DESTRUCTIVE` | no | `false` | Enables destructive tools. |
 | `HESTIACP_ALLOW_SYSTEM` | no | `false` | Enables system-level tools (panel/service infrastructure, service restarts, panel updates). **See Security below.** |
 | `HESTIACP_TOOL_PROFILE` | no | `all` | Tool visibility: `all` (525 tools) or `curated` (38 handcrafted only). |
@@ -96,8 +97,8 @@ Every command is classified into one of four risk tiers. **No command is ever ha
 | Class | Prefix / heuristic | Count | Env flag | Confirm? |
 |---|---|---|---|---|
 | **read** | `list`, `search`, `get`, `check`, `show`, `display`, `view`, `is`, `status`, `test`, `open` | 119 | *(always on)* | No |
-| **mutating** | `add`, `copy`, `import`, `backup`, `schedule`, `generate`, `move`, `rename`, `create`, `upload`, `export`, `download`, `sync` | 104 | `HESTIACP_ALLOW_MUTATIONS=true` | No |
-| **destructive** | `delete`, `change`, `update`, `rebuild`, `restart`, `suspend`, `unsuspend`, `restore`, `remove`, `replace`, `set`, `enable`, `disable`, `start`, `stop`, `purge`, `flush`, `clean`, `repair`, `revoke` | 225 | `HESTIACP_ALLOW_DESTRUCTIVE=true` | **Yes** |
+| **mutating** | `add`, `copy`, `import`, `backup`, `schedule`, `generate`, `move`, `rename`, `create`, `upload`, `export`, `download`, `sync`, `unsuspend` | 122 | `HESTIACP_ALLOW_MUTATIONS=true` | No |
+| **destructive** | `delete`, `change`, `update`, `rebuild`, `restart`, `suspend`, `restore`, `remove`, `replace`, `set`, `enable`, `disable`, `start`, `stop`, `purge`, `flush`, `clean`, `repair`, `revoke` | 207 | `HESTIACP_ALLOW_DESTRUCTIVE=true` | **Yes** |
 | **system** | `-sys-` / `-hestia-` (panel/service infrastructure) or manual override | 77 | `HESTIACP_ALLOW_SYSTEM=true` | **Yes** |
 
 Classification priority (decreasing): manual overrides → read-prefix (even with `-sys-`) → system marker → destructive prefix → mutating prefix → **generator error** (no silent fallback for unknown commands).
@@ -115,8 +116,8 @@ The `HESTIACP_TOOL_PROFILE` variable controls how many tools are visible to the 
 
 | Value | Tools visible | Use case |
 |---|---|---|
-| `all` (default) | 525 | Full server management |
-| `curated` | 38 handcrafted only | Emergency fallback; minimal context with untrusted agents |
+| `all` | 525 | Full server management |
+| `curated` (default) | 38 handcrafted only | Minimal context; safe default for untrusted agents |
 
 ### Handcrafted tools (subset of 38, curated profile)
 
@@ -201,8 +202,8 @@ Generator flags:
   `src/generated/commands.json`).
 - `--noApiPseudo` — skip emitting pseudo-tools (e.g. `v-log-api`); useful for
   generating a catalog that matches an older HestiaCP release
-- `--riskOverrides <path>` — path to a JSON file with per-risk overrides (e.g.
-  `{ "v-restart-service": "safe" }`); overrides take precedence over
+- `--risk-overrides <path>` (alias `--riskOverrides`) — path to a JSON file with per-risk overrides (e.g.
+  `{ "v-restart-service": "mutating" }`; valid values: `read`, `mutating`, `destructive`, `system`); overrides take precedence over
   auto-classified risk
 
 A CI workflow checks that `src/generated/` matches the pinned upstream commit so stale catalogs are detected automatically.
@@ -249,9 +250,10 @@ for troubleshooting and compliance reviews:
 
 | Tag | Origin | Meaning |
 |---|---|---|
-| `[asanitize]` | `generate-commands.mjs` | An unsafe pattern was stripped from a command description during catalog generation |
+| `[aaudit:description]` / `[aaudit:usageExample]` | `generate-commands.mjs` | An unsafe pattern was stripped from a description / usage example during catalog generation (JSON payload) |
+| `[meta]` | `generate-commands.mjs` | Generation summary (counts) |
 | `[adowngrade]` | `generate-commands.mjs` | A command's auto-classified risk was downgraded (e.g. `destructive` → `read`); requires `--force` |
-| `[astartup]` | `tools.ts` (startup) | Schema validation warning during MCP server initialization |
+| `[astartup]` | `index.ts` | Server ready on stdio, with effective profile and gate settings |
 
 These messages are structured for log aggregation and can be piped through
 `grep` for quick audits:

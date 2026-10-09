@@ -5,6 +5,7 @@ import {
   validateTmpFilePath,
   capArgs,
   gateCheck,
+  isLikelyBinary,
   entryRiskClass,
 } from "../src/tools.js";
 
@@ -141,5 +142,36 @@ describe("gateCheck", () => {
     const noMutations = { allowMutations: false, allowDestructive: true, allowSystem: true, allowManagement: false };
     expect(gateCheck("destructive", noMutations)).toContain("HESTIACP_ALLOW_MUTATIONS");
     expect(gateCheck("system", noMutations)).toContain("HESTIACP_ALLOW_MUTATIONS");
+  });
+});
+
+describe("isLikelyBinary", () => {
+  it("accepts plain text, tabs, newlines and unicode", () => {
+    expect(isLikelyBinary("hello\tworld\r\nżółć ✓")).toBe(false);
+    expect(isLikelyBinary("")).toBe(false);
+  });
+  it("flags control characters, DEL and U+FFFD", () => {
+    expect(isLikelyBinary("\u0000\u0001\u0002\u0003\u0004")).toBe(true);
+    expect(isLikelyBinary("\u007f".repeat(5))).toBe(true);
+    expect(isLikelyBinary("\ufffd".repeat(5))).toBe(true);
+  });
+  it("tolerates a few stray control characters", () => {
+    expect(isLikelyBinary("a\u0000b\u0001c")).toBe(false);
+  });
+});
+
+describe("gateCheck management", () => {
+  const base = { allowMutations: true, allowDestructive: true, allowSystem: true };
+  it("blocks when allowManagement is false", () => {
+    expect(gateCheck("management", { ...base, allowManagement: false })).toMatch(/HESTIACP_ALLOW_MANAGEMENT/);
+  });
+  it("allows when allowManagement is true", () => {
+    expect(gateCheck("management", { ...base, allowManagement: true })).toBeNull();
+  });
+});
+
+describe("validateTmpFilePath edge cases", () => {
+  it.each(["", "a/b", "a b", "-x", "..."])("rejects %j", (name) => {
+    expect(() => validateTmpFilePath(name)).toThrow();
   });
 });

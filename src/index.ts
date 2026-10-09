@@ -40,7 +40,9 @@ export async function main(): Promise<void> {
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
   await server.connect(transport);
-  console.error("hestiacp-mcp ready on stdio");
+  console.error(
+    `[astartup] hestiacp-mcp ready on stdio (profile=${config.toolProfile}, mutations=${String(config.allowMutations)}, destructive=${String(config.allowDestructive)}, system=${String(config.allowSystem)}, management=${String(config.allowManagement)})`,
+  );
 }
 
 // Re-export for programmatic MCP integration

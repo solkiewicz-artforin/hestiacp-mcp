@@ -4,8 +4,8 @@
   "auto_register_count": 487,
   "risk_counts": {
     "read": 119,
-    "mutating": 104,
-    "destructive": 225,
+    "mutating": 122,
+    "destructive": 207,
     "system": 77
   },
   "commands": [
@@ -11125,7 +11125,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-cron-job admin 7 yes",
       "stdin": false,
@@ -11147,7 +11147,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-cron-jobs admin no",
       "stdin": false,
@@ -11169,7 +11169,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-database admin mydb",
       "stdin": false,
@@ -11191,7 +11191,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-database-host mysql localhost",
       "stdin": false,
@@ -11208,7 +11208,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "",
       "stdin": false,
@@ -11230,7 +11230,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-dns-domain alice wonderland.com",
       "stdin": false,
@@ -11252,7 +11252,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-dns-domains alice",
       "stdin": false,
@@ -11284,7 +11284,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-dns-record admin example.com 33",
       "stdin": false,
@@ -11306,7 +11306,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-domain admin acme.com",
       "stdin": false,
@@ -11323,7 +11323,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-firewall-rule 7",
       "stdin": false,
@@ -11350,7 +11350,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-mail-account admin acme.com tester",
       "stdin": false,
@@ -11372,7 +11372,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-mail-accounts admin acme.com",
       "stdin": false,
@@ -11394,7 +11394,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-mail-domain user02 acme.com",
       "stdin": false,
@@ -11411,7 +11411,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-mail-domains admin",
       "stdin": false,
@@ -11428,7 +11428,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-remote-dns-host hosname.com",
       "stdin": false,
@@ -11450,7 +11450,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-user bob",
       "stdin": false,
@@ -11477,7 +11477,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-web-domain admin acme.com",
       "stdin": false,
@@ -11499,7 +11499,7 @@
           "kind": "string"
         }
       ],
-      "risk": "destructive",
+      "risk": "mutating",
       "notes": "",
       "usage_example": "v-unsuspend-web-domains admin",
       "stdin": false,

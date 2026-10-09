@@ -30,4 +30,12 @@ describe("loadConfig", () => {
     });
     expect(config.tlsRejectUnauthorized).toBe(false);
   });
+
+  it("management gate falls back to mutations only when unset", () => {
+    expect(loadConfig({ ...required, HESTIACP_ALLOW_MUTATIONS: "true" }).allowManagement).toBe(true);
+    expect(
+      loadConfig({ ...required, HESTIACP_ALLOW_MUTATIONS: "true", HESTIACP_ALLOW_MANAGEMENT: "false" })
+        .allowManagement
+    ).toBe(false);
+  });
 });

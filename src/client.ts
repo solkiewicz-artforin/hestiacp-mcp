@@ -1,4 +1,6 @@
 import { Agent } from "undici";
+import { HESTIA_MAX_ARGS } from "./constants.js";
+import { safeError } from "./redact.js";
 import type { Config } from "./config.js";
 
 export type HestiaResult = {
@@ -91,7 +93,7 @@ async function readBoundedText(
       throw error;
     }
     process.stderr.write(`[HestiaClient] Stream read error for command "${command}": ` +
-      `${error instanceof Error ? error.message : String(error)}\n`);
+      `${safeError(error)}\n`);
     throw new HestiaApiError(
       isTimeoutError(error)
         ? "HestiaCP response timed out; the remote command outcome is unknown, so verify state before retrying"
@@ -131,8 +133,8 @@ export class HestiaClient {
     if (!/^v-[a-z0-9-]+$/.test(command)) {
       throw new HestiaApiError("Invalid HestiaCP command name", command);
     }
-    if (args.length > 13) {
-      throw new HestiaApiError("HestiaCP accepts at most 13 command arguments", command);
+    if (args.length > HESTIA_MAX_ARGS) {
+      throw new HestiaApiError(`HestiaCP accepts at most ${String(HESTIA_MAX_ARGS)} command arguments`, command);
     }
 
     const body: Record<string, string> = {
@@ -161,7 +163,7 @@ export class HestiaClient {
       } as RequestInit);
     } catch (error) {
       process.stderr.write(`[HestiaClient] Request failed for command "${command}": ` +
-        `${error instanceof Error ? error.message : String(error)}\n`);
+        `${safeError(error)}\n`);
       const message =
         isTimeoutError(error)
           ? `HestiaCP request timed out after ${String(timeoutMs)}ms; the remote command outcome is unknown, so verify state before retrying`
